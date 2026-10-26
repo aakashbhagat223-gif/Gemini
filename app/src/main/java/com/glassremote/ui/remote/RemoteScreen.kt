@@ -78,7 +78,7 @@ fun RemoteScreen(vm: RemoteViewModel = hiltViewModel()) {
     val name by vm.deviceName.collectAsStateWithLifecycle()
     val press: (Int) -> Unit = { vm.key(it) }
 
-    GlassBackground {
+    Box(Modifier.fillMaxSize()) {
         Column(
             Modifier
                 .fillMaxSize()
