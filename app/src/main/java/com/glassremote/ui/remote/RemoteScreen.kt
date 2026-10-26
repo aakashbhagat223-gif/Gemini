@@ -138,7 +138,7 @@ private fun TopBar(name: String, status: RemoteStatus, onStatusTap: () -> Unit, 
     val subtitle = when (status.phase) {
         LinkPhase.Ready -> "Connected" + (status.volume?.let { " · Vol $it" } ?: "")
         LinkPhase.Connecting -> "Connecting…"
-        LinkPhase.Disconnected -> "Disconnected · tap to reconnect"
+        LinkPhase.Disconnected -> "Disconnected" + (status.error?.let { " · $it" } ?: "") + " · tap to retry"
         LinkPhase.Idle -> "Not connected · tap to connect"
     }
     Row(
@@ -162,7 +162,7 @@ private fun TopBar(name: String, status: RemoteStatus, onStatusTap: () -> Unit, 
                     name.ifBlank { "Google TV" },
                     color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
                 )
-                Text(subtitle, color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, maxLines = 1)
+                Text(subtitle, color = Color.White.copy(alpha = 0.6f), fontSize = 11.sp, maxLines = 2)
             }
         }
         KeyButton(Modifier.size(52.dp), CircleShape, onPressed = onPower) {
