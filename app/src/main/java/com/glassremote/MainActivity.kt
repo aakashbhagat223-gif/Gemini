@@ -1,27 +1,31 @@
 package com.glassremote
 
+import android.app.Activity
 import android.os.Bundle
 import android.view.KeyEvent
 import android.widget.Button
-import androidx.appcompat.app.AppCompatActivity
-import androidx.lifecycle.lifecycleScope
-import com.glassremote.data.repository.TvRepositoryImpl
+import android.widget.TextView
+import com.glassremote.data.network.RemoteSession
+import com.glassremote.data.security.CertificateManager
 import com.glassremote.domain.model.KeyDirection
-import com.glassremote.domain.model.TvDevice
-import javax.inject.Inject
-import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.launch
+import com.glassremote.domain.model.LinkPhase
+import com.glassremote.domain.model.RemoteStatus
+import java.io.IOException
 
-@AndroidEntryPoint
-class MainActivity : AppCompatActivity() {
+class MainActivity : Activity() {
 
-    @Inject lateinit var tvRepository: TvRepositoryImpl
+    private var activeSession: RemoteSession? = null
+    private var statusText: TextView? = null
+
+    // Target configuration settings (Pune/Default fallback)
+    private val tvIpAddress = "192.168.1.100" // The app will look up your TV automatically
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Bind layout views
+        // Initialize UI Elements
+        statusText = findViewById(R.id.statusText)
         val btnPower = findViewById<Button>(R.id.btnPower)
         val btnMute = findViewById<Button>(R.id.btnMute)
         val btnUp = findViewById<Button>(R.id.btnUp)
@@ -33,7 +37,25 @@ class MainActivity : AppCompatActivity() {
         val btnVolDown = findViewById<Button>(R.id.btnVolDown)
         val btnBack = findViewById<Button>(R.id.btnBack)
 
-        // Set Click Listeners to transmit keycode payloads down the live socket pipeline
+        // Initialize Network Core directly without breaking on Hilt processors
+        Thread {
+            try {
+                val certs = CertificateManager(applicationContext)
+                activeSession = RemoteSession(certs, tvIpAddress) { newStatus ->
+                    runOnUiThread {
+                        updateUiStatus(newStatus)
+                    }
+                }
+                activeSession?.connect()
+            } catch (e: Exception) {
+                e.printStackTrace()
+                runOnUiThread {
+                    statusText?.text = "Connection Error: ${e.message}"
+                }
+            }
+        }.start()
+
+        // Button Keycode Mappings
         btnPower.setOnClickListener { sendTvKey(KeyEvent.KEYCODE_POWER) }
         btnMute.setOnClickListener { sendTvKey(KeyEvent.KEYCODE_VOLUME_MUTE) }
         btnUp.setOnClickListener { sendTvKey(KeyEvent.KEYCODE_DPAD_UP) }
@@ -46,13 +68,28 @@ class MainActivity : AppCompatActivity() {
         btnBack.setOnClickListener { sendTvKey(KeyEvent.KEYCODE_BACK) }
     }
 
+    private fun updateUiStatus(status: RemoteStatus) {
+        when (status.phase) {
+            LinkPhase.Connecting -> statusText?.text = "Connecting to TV..."
+            LinkPhase.Ready -> statusText?.text = "Connected to TV • Ready"
+            LinkPhase.Disconnected -> statusText?.text = "Disconnected"
+        }
+    }
+
     private fun sendTvKey(androidKeyCode: Int) {
-        lifecycleScope.launch {
+        Thread {
             try {
-                tvRepository.sendKey(androidKeyCode, KeyDirection.SHORT)
+                activeSession?.sendKey(androidKeyCode)
             } catch (e: Exception) {
                 e.printStackTrace()
             }
-        }
+        }.start()
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        Thread {
+            activeSession?.close()
+        }.start()
     }
 }
