@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://android.com"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#000000"
+    android:padding="24dp"
+    android:gravity="center_horizontal">
+
+    <!-- Connection Status Header -->
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Connected to Living Room TV"
+        android:textColor="#39FF14"
+        android:fontSize="16sp"
+        android:fontFamily="sans-serif-medium"
+        android:layout_marginBottom="30dp"/>
+
+    <!-- TOP ROW: Power & Mute -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center"
+        android:layout_marginBottom="30dp">
+        <Button
+            android:id="@+id/btnPower"
+            android:layout_width="80dp"
+            android:layout_height="80dp"
+            android:text="⏻"
+            android:textColor="#FF3B30"
+            android:backgroundTint="#1A1A1A"
+            android:textSize="28sp"
+            android:layout_marginRight="40dp"/>
+        <Button
+            android:id="@+id/btnMute"
+            android:layout_width="80dp"
+            android:layout_height="80dp"
+            android:text="🔇"
+            android:backgroundTint="#1A1A1A"
+            android:textSize="24sp"/>
+    </LinearLayout>
+
+    <!-- DIRECTIONAL PAD (D-PAD) MATRIX -->
+    <RelativeLayout
+        android:layout_width="240dp"
+        android:layout_height="240dp"
+        android:layout_marginBottom="40dp">
+        <Button
+            android:id="@+id/btnUp"
+            android:layout_width="70dp"
+            android:layout_height="70dp"
+            android:text="▲"
+            android:backgroundTint="#222222"
+            android:layout_centerHorizontal="true"
+            android:layout_alignParentTop="true"/>
+        <Button
+            android:id="@+id/btnLeft"
+            android:layout_width="70dp"
+            android:layout_height="70dp"
+            android:text="◀"
+            android:backgroundTint="#222222"
+            android:layout_centerVertical="true"
+            android:layout_alignParentLeft="true"/>
+        <Button
+            android:id="@+id/btnCenter"
+            android:layout_width="80dp"
+            android:layout_height="80dp"
+            android:text="OK"
+            android:textColor="#39FF14"
+            android:backgroundTint="#111111"
+            android:layout_centerInParent="true"/>
+        <Button
+            android:id="@+id/btnRight"
+            android:layout_width="70dp"
+            android:layout_height="70dp"
+            android:text="▶"
+            android:backgroundTint="#222222"
+            android:layout_centerVertical="true"
+            android:layout_alignParentRight="true"/>
+        <Button
+            android:id="@+id/btnDown"
+            android:layout_width="70dp"
+            android:layout_height="70dp"
+            android:text="▼"
+            android:backgroundTint="#222222"
+            android:layout_centerHorizontal="true"
+            android:layout_alignParentBottom="true"/>
+    </RelativeLayout>
+
+    <!-- BOTTOM ROW: Volume & Navigation Buttons -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center"
+        android:gap="20dp">
+        <Button
+            android:id="@+id/btnVolDown"
+            android:layout_width="70dp"
+            android:layout_height="60dp"
+            android:text="VOL -"
+            android:backgroundTint="#1A1A1A"/>
+        <Button
+            android:id="@+id/btnBack"
+            android:layout_width="80dp"
+            android:layout_height="60dp"
+            android:text="↩ BACK"
+            android:backgroundTint="#1A1A1A"
+            android:layout_marginLeft="15dp"
+            android:layout_marginRight="15dp"/>
+        <Button
+            android:id="@+id/btnVolUp"
+            android:layout_width="70dp"
+            android:layout_height="60dp"
+            android:text="VOL +"
+            android:backgroundTint="#1A1A1A"/>
+    </LinearLayout>
+
+</LinearLayout>
