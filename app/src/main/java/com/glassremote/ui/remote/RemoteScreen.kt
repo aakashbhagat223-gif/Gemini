@@ -4,6 +4,8 @@ import android.view.KeyEvent
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -11,10 +13,10 @@ import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -27,6 +29,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowLeft
@@ -39,18 +43,15 @@ import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material.icons.rounded.Tv
 import androidx.compose.material.icons.rounded.VolumeOff
-import androidx.compose.material.icons.rounded.VolumeUp
-import androidx.compose.material.icons.rounded.ExpandLess
-import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -58,39 +59,57 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.glassremote.domain.model.LinkPhase
 import com.glassremote.domain.model.RemoteStatus
-import com.glassremote.ui.theme.GlassBackground
 import com.glassremote.ui.theme.glass
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlin.math.abs
+
+private data class AppEntry(val label: String, val target: String)
+
+private val APPS = listOf(
+    AppEntry("YouTube", "https://www.youtube.com"),
+    AppEntry("Stremio", "market://launch?id=com.stremio.one"),
+    AppEntry("Netflix", "market://launch?id=com.netflix.ninja"),
+    AppEntry("Prime Video", "market://launch?id=com.amazon.amazonvideo.livingroom"),
+    AppEntry("Spotify", "market://launch?id=com.spotify.tv.android"),
+    AppEntry("Disney+", "market://launch?id=com.disney.disneyplus"),
+)
 
 @Composable
 fun RemoteScreen(vm: RemoteViewModel = hiltViewModel()) {
     val status by vm.status.collectAsStateWithLifecycle()
     val name by vm.deviceName.collectAsStateWithLifecycle()
     val press: (Int) -> Unit = { vm.key(it) }
+    var trackpad by rememberSaveable { mutableStateOf(false) }
+    var showApps by rememberSaveable { mutableStateOf(false) }
 
     Box(Modifier.fillMaxSize()) {
         Column(
             Modifier
                 .fillMaxSize()
                 .statusBarsPadding()
-                .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(22.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
             TopBar(name, status, onStatusTap = { vm.reconnect() }, onPower = { press(KeyEvent.KEYCODE_POWER) })
-            DPad(press)
+
+            if (trackpad) Trackpad(press) else DPad(press)
+            ModeSwitch(trackpad) { trackpad = it }
 
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 KeyButton(Modifier.size(92.dp, 58.dp), RoundedCornerShape(29.dp), onPressed = { press(KeyEvent.KEYCODE_BACK) }) {
@@ -115,15 +134,19 @@ fun RemoteScreen(vm: RemoteViewModel = hiltViewModel()) {
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                AppTile("Netflix", Icons.Rounded.Movie) { vm.launchApp("com.netflix.ninja") }
-                AppTile("Prime", Icons.Rounded.Tv) { vm.launchApp("com.amazon.amazonvideo.livingroom") }
                 AppTile("YouTube", Icons.Rounded.PlayArrow) { vm.launchApp("https://www.youtube.com") }
-                AppTile("Apps", Icons.Rounded.Apps) { press(KeyEvent.KEYCODE_ALL_APPS) }
+                AppTile("Stremio", Icons.Rounded.Movie) { vm.launchApp("market://launch?id=com.stremio.one") }
+                AppTile("HDMI 2", Icons.Rounded.Tv) { press(KeyEvent.KEYCODE_TV_INPUT_HDMI_2) }
+                AppTile("Apps", Icons.Rounded.Apps) { showApps = true }
             }
+        }
 
-            TextButton(onClick = { vm.forget() }) {
-                Text("Forget this TV", color = Color.White.copy(alpha = 0.5f), fontSize = 13.sp)
-            }
+        if (showApps) {
+            AppPicker(
+                onDismiss = { showApps = false },
+                onLaunch = { target -> vm.launchApp(target); showApps = false },
+                onTvList = { press(KeyEvent.KEYCODE_ALL_APPS); showApps = false },
+            )
         }
     }
 }
@@ -196,6 +219,84 @@ private fun BoxScope.DPadArrow(icon: ImageVector, align: Alignment, code: Int, p
     ) { Glyph(icon, 36.dp) }
 }
 
+/** Swipe to move (one key per ~40dp of travel), tap to select. */
+@Composable
+private fun Trackpad(press: (Int) -> Unit) {
+    val haptic = LocalHapticFeedback.current
+    val send by rememberUpdatedState<(Int) -> Unit> { code ->
+        haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+        press(code)
+    }
+    Box(
+        Modifier
+            .size(300.dp, 272.dp)
+            .glass(RoundedCornerShape(40.dp))
+            .pointerInput(Unit) {
+                val threshold = 40.dp.toPx()
+                awaitEachGesture {
+                    val down = awaitFirstDown()
+                    var ax = 0f
+                    var ay = 0f
+                    var moved = false
+                    var finished = false
+                    while (!finished) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull { it.id == down.id }
+                        if (change == null || !change.pressed) {
+                            finished = true
+                        } else {
+                            val d = change.positionChange()
+                            ax += d.x
+                            ay += d.y
+                            if (abs(ax) > threshold || abs(ay) > threshold) {
+                                moved = true
+                                val code = if (abs(ax) > abs(ay)) {
+                                    if (ax > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
+                                } else {
+                                    if (ay > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP
+                                }
+                                send(code)
+                                ax = 0f
+                                ay = 0f
+                            }
+                            change.consume()
+                        }
+                    }
+                    if (!moved) send(KeyEvent.KEYCODE_DPAD_CENTER)
+                }
+            },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("Swipe to move · tap to select", color = Color.White.copy(alpha = 0.35f), fontSize = 13.sp)
+    }
+}
+
+@Composable
+private fun ModeSwitch(trackpad: Boolean, onChange: (Boolean) -> Unit) {
+    Row(Modifier.height(40.dp).glass(RoundedCornerShape(20.dp)).padding(3.dp)) {
+        listOf("Wheel" to false, "Trackpad" to true).forEach { (label, value) ->
+            val selected = trackpad == value
+            Box(
+                Modifier
+                    .width(96.dp)
+                    .fillMaxHeight()
+                    .background(
+                        if (selected) Color.White.copy(alpha = 0.18f) else Color.Transparent,
+                        RoundedCornerShape(17.dp),
+                    )
+                    .clickable { onChange(value) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    label,
+                    color = if (selected) Color.White else Color.White.copy(alpha = 0.55f),
+                    fontSize = 13.sp,
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun PillControl(
     label: String, upIcon: ImageVector, downIcon: ImageVector,
@@ -229,6 +330,40 @@ private fun AppTile(label: String, icon: ImageVector, onClick: () -> Unit) {
 }
 
 @Composable
+private fun AppPicker(onDismiss: () -> Unit, onLaunch: (String) -> Unit, onTvList: () -> Unit) {
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            Modifier.fillMaxWidth().glass(RoundedCornerShape(28.dp), strong = true).padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text("Open an app", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            APPS.chunked(2).forEach { row ->
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    row.forEach { app ->
+                        Box(
+                            Modifier
+                                .weight(1f)
+                                .height(54.dp)
+                                .glass(RoundedCornerShape(18.dp))
+                                .clickable { onLaunch(app.target) },
+                            contentAlignment = Alignment.Center,
+                        ) { Text(app.label, color = Color.White, fontSize = 14.sp) }
+                    }
+                }
+            }
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(54.dp)
+                    .glass(RoundedCornerShape(18.dp))
+                    .clickable(onClick = onTvList),
+                contentAlignment = Alignment.Center,
+            ) { Text("Show the TV's own app list", color = Color.White.copy(alpha = 0.8f), fontSize = 14.sp) }
+        }
+    }
+}
+
+@Composable
 private fun Glyph(icon: ImageVector, size: Dp, tint: Color = Color.White.copy(alpha = 0.92f)) {
     Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(size))
 }
@@ -253,7 +388,7 @@ private fun KeyButton(
     )
 }
 
-/** Fires on touch-down; if [repeat], keeps firing while held (volume, d-pad). */
+/** Fires on touch-down with a haptic tick; if [repeat], keeps firing while held. */
 @Composable
 private fun Modifier.holdKey(
     repeat: Boolean,
@@ -261,11 +396,13 @@ private fun Modifier.holdKey(
     onDown: (Boolean) -> Unit = {},
 ): Modifier {
     val scope = rememberCoroutineScope()
+    val haptic = LocalHapticFeedback.current
     val current by rememberUpdatedState(onPressed)
     val downCallback by rememberUpdatedState(onDown)
     return pointerInput(repeat) {
         detectTapGestures(onPress = {
             downCallback(true)
+            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
             current()
             val job = if (repeat) scope.launch {
                 delay(450)
