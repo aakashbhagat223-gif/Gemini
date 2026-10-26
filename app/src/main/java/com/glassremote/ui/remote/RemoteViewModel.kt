@@ -4,10 +4,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.glassremote.data.repository.PairedDeviceStore
 import com.glassremote.domain.model.KeyDirection
+import com.glassremote.domain.model.LinkPhase
 import com.glassremote.domain.model.RemoteStatus
 import com.glassremote.domain.model.TvDevice
 import com.glassremote.domain.repository.TvRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
@@ -24,7 +26,6 @@ class RemoteViewModel @Inject constructor(
 
     val status: StateFlow<RemoteStatus> = repo.status
 
-    /** null = still loading, true = a TV is saved, false = needs pairing. */
     val saved: StateFlow<Boolean?> = store.lastDevice
         .map<TvDevice?, Boolean?> { it != null }
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
@@ -33,7 +34,24 @@ class RemoteViewModel @Inject constructor(
         .map { it?.name ?: "" }
         .stateIn(viewModelScope, SharingStarted.Eagerly, "")
 
-    init { reconnect() }
+    init {
+        reconnect()
+        // If the TV drops the link (e.g. after launching an app), quietly reconnect up to 3 times.
+        viewModelScope.launch {
+            var retries = 0
+            repo.status.collect { s ->
+                when (s.phase) {
+                    LinkPhase.Ready -> retries = 0
+                    LinkPhase.Disconnected -> if (retries < 3) {
+                        retries++
+                        delay(1_500)
+                        reconnect()
+                    }
+                    else -> Unit
+                }
+            }
+        }
+    }
 
     fun reconnect() {
         viewModelScope.launch {
@@ -50,7 +68,6 @@ class RemoteViewModel @Inject constructor(
         viewModelScope.launch { runCatching { repo.launchApp(target) } }
     }
 
-    /** Forgets the TV and this phone's identity; the app returns to the pairing screen. */
     fun forget() {
         viewModelScope.launch { repo.resetPairing() }
     }
