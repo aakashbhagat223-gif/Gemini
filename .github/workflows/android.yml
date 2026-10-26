@@ -1,0 +1,50 @@
+name: GlassRemote Production Build
+
+on:
+  push:
+    branches: [ "main", "master" ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Repository Code
+      uses: actions/checkout@v4
+
+    - name: Decompress Internal Assets
+      run: |
+        unzip -o project.zip || true
+        rm -f project.zip
+        
+    - name: Smart Pathway Normalization
+      run: |
+        # If the contents were wrapped in an extra subfolder level during zipping, bring them out safely
+        INNER_DIR=$(find . -maxdepth 3 -type f -name "settings.gradle.kts" -print -quit)
+        if [ ! -z "$INNER_DIR" ] && [ "$INNER_DIR" != "./settings.gradle.kts" ]; then
+          TARGET_DIR=$(dirname "$INNER_DIR")
+          echo "Flattening structural pathways out of $TARGET_DIR..."
+          cp -r $TARGET_DIR/* . 2>/dev/null || true
+          cp -r $TARGET_DIR/.* . 2>/dev/null || true
+        fi
+
+    - name: Set up JDK 17 Environment
+      uses: actions/setup-java@v4
+      with:
+        java-version: '17'
+        distribution: 'temurin'
+
+    - name: Generate Wrapper Engine
+      run: |
+        gradle wrapper --gradle-version 8.2
+        chmod +x gradlew
+
+    - name: Compile to Standalone APK
+      run: ./gradlew assembleDebug
+
+    - name: Export Ready APK Binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: GlassRemoteApp
+        path: app/build/outputs/apk/debug/app-debug.apk
+        
