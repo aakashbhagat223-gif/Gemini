@@ -38,7 +38,19 @@ jobs:
       run: |
         gradle wrapper --gradle-version 8.9
         chmod +x gradlew
-
+    - name: Automatic Kotlin Code Repair Patch
+      run: |
+        # Use find to locate RemoteSession.kt anywhere inside the decompressed workspace folder tree
+        TARGET_FILE=$(find . -type f -name "RemoteSession.kt" -print -quit)
+        if [ ! -z "$TARGET_FILE" ]; then
+          echo "Found file at $TARGET_FILE. Injecting coroutine scope compatibility fixes..."
+          # Replace the incorrect '.isActive' check on the raw context tracker parameter with a proper execution loop handle
+          sed -i 's/CoroutineContext.isActive/isActive/g' "$TARGET_FILE"
+          sed -i 's/coroutineContext.isActive/isActive/g' "$TARGET_FILE"
+        else
+          echo "Target code file not found in current folder structure path checks."
+        fi
+        
     - name: Compile to Standalone APK
       run: ./gradlew assembleDebug
 
