@@ -68,13 +68,14 @@ class MainActivity : Activity() {
         btnBack.setOnClickListener { sendTvKey(KeyEvent.KEYCODE_BACK) }
     }
 
-    private fun updateUiStatus(status: RemoteStatus) {
-        when (status.phase) {
-            LinkPhase.Connecting -> statusText?.text = "Connecting to TV..."
-            LinkPhase.Ready -> statusText?.text = "Connected to TV • Ready"
-            LinkPhase.Disconnected -> statusText?.text = "Disconnected"
-        }
+private fun updateUiStatus(status: RemoteStatus) {
+    when (status.phase) {
+        LinkPhase.Connecting -> statusText?.text = "Connecting to TV..."
+        LinkPhase.Ready -> statusText?.text = "Connected to TV • Ready"
+        LinkPhase.Disconnected -> statusText?.text = "Disconnected"
+        else -> statusText?.text = "Ready to Pair"
     }
+}
 
     private fun sendTvKey(androidKeyCode: Int) {
         Thread {
