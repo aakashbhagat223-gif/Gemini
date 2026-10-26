@@ -1,9 +1,16 @@
 package com.glassremote.ui.dashboard
 
+import android.Manifest
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
+import android.view.KeyEvent
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,22 +27,31 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
+import com.glassremote.data.ir.IrBlaster
 import com.glassremote.data.repository.PairedDeviceStore
 import com.glassremote.domain.model.LinkPhase
 import com.glassremote.domain.model.RemoteStatus
@@ -53,22 +69,31 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.Socket
 import javax.inject.Inject
+import kotlin.math.abs
 
-data class NetInfo(val wifi: Boolean = false, val phoneIp: String? = null, val pingMs: Int? = null)
+data class NetInfo(
+    val wifi: Boolean = false,
+    val phoneIp: String? = null,
+    val pingMs: Int? = null,
+    val ssid: String? = null,
+)
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class DashboardViewModel @Inject constructor(
-    repo: TvRepository,
+    private val repo: TvRepository,
     store: PairedDeviceStore,
+    ir: IrBlaster,
     @ApplicationContext private val ctx: Context,
 ) : ViewModel() {
 
     val status: StateFlow<RemoteStatus> = repo.status
+    val irSupported: Boolean = ir.isSupported
 
     val device: StateFlow<TvDevice?> = store.lastDevice
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
@@ -86,6 +111,13 @@ class DashboardViewModel @Inject constructor(
         .flowOn(Dispatchers.IO)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), NetInfo())
 
+    /** Positive = brighter, negative = dimmer; one key press per step. */
+    fun nudgeBrightness(steps: Int) {
+        if (steps == 0) return
+        val code = if (steps > 0) KeyEvent.KEYCODE_BRIGHTNESS_UP else KeyEvent.KEYCODE_BRIGHTNESS_DOWN
+        viewModelScope.launch { repeat(abs(steps)) { runCatching { repo.sendKey(code) } } }
+    }
+
     private fun measure(d: TvDevice?): NetInfo {
         val cm = ctx.getSystemService(ConnectivityManager::class.java)
         val network = cm.activeNetwork
@@ -102,7 +134,18 @@ class DashboardViewModel @Inject constructor(
                 null
             }
         }
-        return NetInfo(wifi, ip, ping)
+        return NetInfo(wifi, ip, ping, if (wifi) readSsid() else null)
+    }
+
+    @Suppress("DEPRECATION")
+    private fun readSsid(): String? {
+        if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION)
+            != PackageManager.PERMISSION_GRANTED
+        ) return null
+        val wm = ctx.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager ?: return null
+        val raw = wm.connectionInfo?.ssid ?: return null
+        val name = raw.trim('"')
+        return if (name.isBlank() || name == "<unknown ssid>") null else name
     }
 }
 
@@ -111,6 +154,17 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
     val status by vm.status.collectAsStateWithLifecycle()
     val device by vm.device.collectAsStateWithLifecycle()
     val net by vm.net.collectAsStateWithLifecycle()
+    val ctx = LocalContext.current
+
+    var hasLocation by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED
+        )
+    }
+    val askLocation = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        hasLocation = it
+    }
 
     val linkColor = when (status.phase) {
         LinkPhase.Ready -> Color(0xFF34D399)
@@ -148,6 +202,24 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
         }
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             StatTile(
+                "Wi-Fi",
+                when {
+                    net.ssid != null -> net.ssid!!
+                    !hasLocation -> "Tap to show name"
+                    net.wifi -> "Connected"
+                    else -> "Off"
+                },
+                Modifier.weight(1f),
+                onClick = if (!hasLocation) ({ askLocation.launch(Manifest.permission.ACCESS_FINE_LOCATION) }) else null,
+            )
+            StatTile(
+                "IR blaster",
+                if (vm.irSupported) "Available" else "Not supported",
+                Modifier.weight(1f),
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            StatTile(
                 "Volume",
                 status.volume?.let { v -> if (status.muted == true) "Muted" else "$v / ${status.volumeMax ?: "?"}" } ?: "—",
                 Modifier.weight(1f),
@@ -158,6 +230,41 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
                 Modifier.weight(1f),
             )
         }
+
+        BrightnessCard { steps -> vm.nudgeBrightness(steps) }
+    }
+}
+
+@Composable
+private fun BrightnessCard(onSteps: (Int) -> Unit) {
+    var level by remember { mutableFloatStateOf(50f) }
+    var last by remember { mutableFloatStateOf(50f) }
+    Column(
+        Modifier.fillMaxWidth().glass(RoundedCornerShape(24.dp)).padding(18.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text("TV brightness", color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp)
+        Slider(
+            value = level,
+            onValueChange = { new ->
+                level = new
+                val steps = ((new - last) / 5f).toInt()
+                if (steps != 0) {
+                    onSteps(steps)
+                    last += steps * 5f
+                }
+            },
+            valueRange = 0f..100f,
+            colors = SliderDefaults.colors(
+                thumbColor = Color.White,
+                activeTrackColor = Color.White.copy(alpha = 0.8f),
+                inactiveTrackColor = Color.White.copy(alpha = 0.2f),
+            ),
+        )
+        Text(
+            "Sends brightness keys, so it moves relative to where the TV is now. Some TVs ignore it.",
+            color = Color.White.copy(alpha = 0.45f), fontSize = 11.sp,
+        )
     }
 }
 
@@ -187,9 +294,19 @@ private fun NowPlaying() {
 }
 
 @Composable
-private fun StatTile(label: String, value: String, modifier: Modifier, dot: Color? = null) {
+private fun StatTile(
+    label: String,
+    value: String,
+    modifier: Modifier,
+    dot: Color? = null,
+    onClick: (() -> Unit)? = null,
+) {
     Column(
-        modifier.height(92.dp).glass(RoundedCornerShape(24.dp)).padding(16.dp),
+        modifier
+            .height(92.dp)
+            .glass(RoundedCornerShape(24.dp))
+            .let { if (onClick != null) it.clickable(onClick = onClick) else it }
+            .padding(16.dp),
         verticalArrangement = Arrangement.SpaceBetween,
     ) {
         Text(label, color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp)
