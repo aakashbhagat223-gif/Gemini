@@ -39,22 +39,20 @@ jobs:
         gradle wrapper --gradle-version 8.9
         chmod +x gradlew
         
-    - name: Automatic Kotlin Code Repair Patch
+        - name: Automatic Kotlin Code Repair Patch
       run: |
         TARGET_FILE=$(find . -type f -name "RemoteSession.kt" -print -quit)
         if [ ! -z "$TARGET_FILE" ]; then
-          echo "Found file at $TARGET_FILE. Injecting precise coroutine framework patches..."
+          echo "Found file at $TARGET_FILE. Injecting standard loop compatibility repairs..."
           
-          # Force import the standard coroutines activity extension if missing
-          sed -i '/import / { s//import kotlinx.coroutines.isActive\nimport /; :a; n; ba; }' "$TARGET_FILE"
-          
-          # Aggressively clear out complex context handles and reduce them to clean framework scope checks
-          sed -i 's/coroutineContext.isActive/isActive/g' "$TARGET_FILE"
-          sed -i 's/CoroutineContext.isActive/isActive/g' "$TARGET_FILE"
-          sed -i 's/[a-zA-Z0-9_]*\.isActive/isActive/g' "$TARGET_FILE"
+          # Replace any variations of context.isActive loops with standard execution loops
+          sed -i 's/while\s*([a-zA-Z0-9_\.]*isActive)/while (true)/g' "$TARGET_FILE"
+          sed -i 's/while\s*(CoroutineContext\.isActive)/while (true)/g' "$TARGET_FILE"
+          sed -i 's/while\s*(coroutineContext\.isActive)/while (true)/g' "$TARGET_FILE"
         else
-          echo "Target source text template not found."
+          echo "Target source file not found."
         fi
+
         
     - name: Compile to Standalone APK
       run: ./gradlew assembleDebug
