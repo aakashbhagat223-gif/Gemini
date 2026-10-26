@@ -14,10 +14,8 @@ jobs:
 
     - name: Decompress Internal Assets
       run: |
-        unzip -o project.zip || true
+        unzip -n project.zip || true
         rm -f project.zip
-        # Aggressively clear out the broken zip file so GitHub uses our new one
-        rm -f app/src/main/java/com/glassremote/data/network/RemoteSession.kt 2>/dev/null || true
 
         
     - name: Smart Pathway Normalization
@@ -26,8 +24,8 @@ jobs:
         if [ ! -z "$INNER_DIR" ] && [ "$INNER_DIR" != "./settings.gradle.kts" ]; then
           TARGET_DIR=$(dirname "$INNER_DIR")
           echo "Flattening structural pathways out of $TARGET_DIR..."
-          cp -r $TARGET_DIR/* . 2>/dev/null || true
-          cp -r $TARGET_DIR/.* . 2>/dev/null || true
+          cp -rn $TARGET_DIR/* . 2>/dev/null || true
+          cp -rn $TARGET_DIR/.* . 2>/dev/null || true
         fi
 
     - name: Set up JDK 17 Environment
