@@ -16,6 +16,9 @@ jobs:
       run: |
         unzip -o project.zip || true
         rm -f project.zip
+        # Aggressively clear out the broken zip file so GitHub uses our new one
+        rm -f app/src/main/java/com/glassremote/data/network/RemoteSession.kt 2>/dev/null || true
+
         
     - name: Smart Pathway Normalization
       run: |
