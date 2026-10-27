@@ -3,6 +3,8 @@ package com.glassremote.ui.remote
 import android.view.KeyEvent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.glassremote.data.adb.AdbManager
+import com.glassremote.data.adb.NativeActions
 import com.glassremote.data.macro.MacroIds
 import com.glassremote.data.macro.MacroRecorder
 import com.glassremote.data.macro.MacroRunner
@@ -36,6 +38,8 @@ class RemoteViewModel @Inject constructor(
     private val macros: MacroStore,
     private val runner: MacroRunner,
     private val recorder: MacroRecorder,
+    private val adb: AdbManager,
+    private val nativeActions: NativeActions,
 ) : ViewModel() {
 
     val status: StateFlow<RemoteStatus> = repo.status
@@ -48,7 +52,6 @@ class RemoteViewModel @Inject constructor(
         .map { it?.name ?: "" }
         .stateIn(viewModelScope, SharingStarted.Eagerly, "")
 
-    /** TV text-field state, used by the Keypad. */
     val ime: StateFlow<ImeInfo> = ImeBridge.state
 
     private val _replaceMode = MutableStateFlow(true)
@@ -58,7 +61,6 @@ class RemoteViewModel @Inject constructor(
 
     init {
         reconnect()
-        // If the TV drops the link, quietly reconnect up to 3 times.
         viewModelScope.launch {
             var retries = 0
             repo.status.collect { s ->
@@ -73,7 +75,6 @@ class RemoteViewModel @Inject constructor(
                 }
             }
         }
-        // New text field on the TV: start our buffer from what it already contains.
         viewModelScope.launch {
             ImeBridge.state
                 .map { it.active to it.label }
@@ -98,16 +99,39 @@ class RemoteViewModel @Inject constructor(
         viewModelScope.launch { runCatching { repo.launchApp(target) } }
     }
 
+    /** HDMI 2: native input switch when ADB is connected and an input is saved; otherwise the macro. */
     fun runMacro(id: String) {
-        viewModelScope.launch { runCatching { runner.run(macros.get(id)) } }
+        viewModelScope.launch {
+            runCatching {
+                if (id == MacroIds.HDMI2 && adb.state.value.connected) {
+                    val input = nativeActions.savedHdmi2()
+                    if (input.isNotBlank()) {
+                        nativeActions.switchInput(input)
+                        return@launch
+                    }
+                }
+                runner.run(macros.get(id))
+            }
+        }
     }
 
+    /**
+     * Stremio: native launch over ADB when connected. Otherwise the saved Stremio field:
+     * empty = stremio:// link, a link or intent: URI = sent as an app link, anything else = key macro.
+     */
     fun openStremio() {
         viewModelScope.launch {
-            val macro = macros.get(MacroIds.STREMIO)
             runCatching {
-                if (macro.isBlank()) repo.launchApp("market://launch?id=com.stremio.one")
-                else runner.run(macro)
+                if (adb.state.value.connected) {
+                    nativeActions.launchPackage("com.stremio.one")
+                    return@launch
+                }
+                val macro = macros.get(MacroIds.STREMIO).trim()
+                when {
+                    macro.isBlank() -> repo.launchApp("stremio://")
+                    macro.contains("://") || macro.startsWith("intent:") -> repo.launchApp(macro)
+                    else -> runner.run(macro)
+                }
             }
         }
     }
