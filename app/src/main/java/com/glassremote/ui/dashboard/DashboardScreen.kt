@@ -52,6 +52,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.glassremote.data.ir.IrBlaster
+import com.glassremote.data.macro.MacroIds
+import com.glassremote.data.macro.MacroRunner
+import com.glassremote.data.macro.MacroStore
 import com.glassremote.data.repository.PairedDeviceStore
 import com.glassremote.domain.model.LinkPhase
 import com.glassremote.domain.model.RemoteStatus
@@ -62,6 +65,8 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -89,6 +94,8 @@ class DashboardViewModel @Inject constructor(
     private val repo: TvRepository,
     store: PairedDeviceStore,
     ir: IrBlaster,
+    private val macros: MacroStore,
+    private val runner: MacroRunner,
     @ApplicationContext private val ctx: Context,
 ) : ViewModel() {
 
@@ -111,11 +118,44 @@ class DashboardViewModel @Inject constructor(
         .flowOn(Dispatchers.IO)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), NetInfo())
 
-    /** Positive = brighter, negative = dimmer; one key press per step. */
-    fun nudgeBrightness(steps: Int) {
-        if (steps == 0) return
-        val code = if (steps > 0) KeyEvent.KEYCODE_BRIGHTNESS_UP else KeyEvent.KEYCODE_BRIGHTNESS_DOWN
-        viewModelScope.launch { repeat(abs(steps)) { runCatching { repo.sendKey(code) } } }
+    // Brightness: slider movement -> backlight macro session on the TV.
+    private val presses = Channel<Int>(Channel.UNLIMITED)
+    private var sessionOpen = false
+    private var acc = 0
+    private var unitsPerPress = 1
+
+    init {
+        viewModelScope.launch { macros.unitsFlow.collect { unitsPerPress = it } }
+        viewModelScope.launch {
+            var closeJob: Job? = null
+            for (steps in presses) {
+                closeJob?.cancel()
+                if (!sessionOpen) {
+                    runCatching { runner.run(macros.get(MacroIds.BACKLIGHT_OPEN)) }
+                    sessionOpen = true
+                }
+                val code = if (steps > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
+                repeat(abs(steps)) {
+                    runCatching { repo.sendKey(code) }
+                    delay(120)
+                }
+                closeJob = launch {
+                    delay(3_000)
+                    runCatching { runner.run(macros.get(MacroIds.BACKLIGHT_CLOSE)) }
+                    sessionOpen = false
+                }
+            }
+        }
+    }
+
+    /** [delta] is slider units moved since the last call (positive = brighter). */
+    fun nudgeBrightness(delta: Int) {
+        acc += delta
+        val steps = acc / unitsPerPress
+        if (steps != 0) {
+            acc -= steps * unitsPerPress
+            presses.trySend(steps)
+        }
     }
 
     private fun measure(d: TvDevice?): NetInfo {
@@ -231,27 +271,27 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
             )
         }
 
-        BrightnessCard { steps -> vm.nudgeBrightness(steps) }
+        BrightnessCard { delta -> vm.nudgeBrightness(delta) }
     }
 }
 
 @Composable
-private fun BrightnessCard(onSteps: (Int) -> Unit) {
+private fun BrightnessCard(onDelta: (Int) -> Unit) {
     var level by remember { mutableFloatStateOf(50f) }
     var last by remember { mutableFloatStateOf(50f) }
     Column(
         Modifier.fillMaxWidth().glass(RoundedCornerShape(24.dp)).padding(18.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text("TV brightness", color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp)
+        Text("TV backlight", color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp)
         Slider(
             value = level,
             onValueChange = { new ->
                 level = new
-                val steps = ((new - last) / 5f).toInt()
-                if (steps != 0) {
-                    onSteps(steps)
-                    last += steps * 5f
+                val delta = (new - last).toInt()
+                if (delta != 0) {
+                    onDelta(delta)
+                    last += delta
                 }
             },
             valueRange = 0f..100f,
@@ -262,7 +302,8 @@ private fun BrightnessCard(onSteps: (Int) -> Unit) {
             ),
         )
         Text(
-            "Sends brightness keys, so it moves relative to where the TV is now. Some TVs ignore it.",
+            "Opens Settings → Picture → Backlight on the TV, then nudges it as you drag. " +
+                "Relative control: the starting position isn't read from the TV. Edit the steps in the Macros tab.",
             color = Color.White.copy(alpha = 0.45f), fontSize = 11.sp,
         )
     }
