@@ -1,6 +1,6 @@
 package com.glassremote.data.repository
 
-import android.view.KeyEvent
+import com.glassremote.data.bluetooth.BluetoothHidController
 import com.glassremote.data.network.PairingClient
 import com.glassremote.data.network.PairingSession
 import com.glassremote.data.network.RemoteSession
@@ -27,6 +27,7 @@ class TvRepositoryImpl @Inject constructor(
     private val discovery: TvDiscovery,
     private val certs: CertificateManager,
     private val store: PairedDeviceStore,
+    private val bluetooth: BluetoothHidController,
 ) : TvRepository {
 
     private val _status = MutableStateFlow(RemoteStatus())
@@ -36,8 +37,6 @@ class TvRepositoryImpl @Inject constructor(
     @Volatile private var remote: RemoteSession? = null
 
     override fun discover(): Flow<List<TvDevice>> = discovery.discover()
-
-    // ---------- pairing ----------
 
     override suspend fun beginPairing(device: TvDevice) {
         pairing?.close()
@@ -52,15 +51,12 @@ class TvRepositoryImpl @Inject constructor(
         store.save(device)
     }
 
-    // ---------- control channel ----------
-
     override suspend fun connect(device: TvDevice) = withContext(Dispatchers.IO) {
         disconnect()
         _status.value = RemoteStatus(LinkPhase.Connecting)
 
         lateinit var session: RemoteSession
         session = RemoteSession(certs, device.host) { newStatus ->
-            // Ignore late callbacks from a session that has been replaced.
             if (remote === session) _status.value = newStatus
         }
         remote = session
@@ -74,35 +70,36 @@ class TvRepositoryImpl @Inject constructor(
         }
     }
 
+    /**
+     * Routing: Wi-Fi remote link first. Bluetooth takes over when the link is down, a send fails,
+     * or "Prefer Bluetooth" is on (and Bluetooth is connected).
+     */
     override suspend fun sendKey(keyCode: Int, direction: KeyDirection) {
-        val session = remote ?: return
+        val session = remote
+        val wifiOk = session != null && session.isRunning.get() && _status.value.phase == LinkPhase.Ready
+        val preferBt = bluetooth.prefer.value && bluetooth.isConnected
         val dir = when (direction) {
             KeyDirection.Short -> RemoteDirection.DIRECTION_SHORT
             KeyDirection.StartLong -> RemoteDirection.DIRECTION_START_LONG
             KeyDirection.EndLong -> RemoteDirection.DIRECTION_END_LONG
         }
         withContext(Dispatchers.IO) {
-            try {
-                session.sendKey(keyCode, dir)
-            } catch (_: IOException) {
-                session.close() // reader thread/close() publishes Disconnected
+            if (wifiOk && !preferBt && session != null) {
+                try {
+                    session.sendKey(keyCode, dir)
+                    return@withContext
+                } catch (_: IOException) {
+                    session.close()
+                }
             }
+            if (bluetooth.isConnected) bluetooth.sendKey(keyCode)
         }
     }
 
-    /** Convenience overload using readable names, e.g. sendKey("UP"), sendKey("VOL_UP"). */
-    suspend fun sendKey(keyName: String, direction: KeyDirection = KeyDirection.Short) {
-        val code = KEY_NAMES[keyName.trim().uppercase()] ?: return
-        sendKey(code, direction)
-    }
-
-    /**
-     * Accepts a full link ("https://www.youtube.com", "market://launch?id=...")
-     * or a bare package name, which is converted to a market:// launch link.
-     */
     override suspend fun launchApp(deepLink: String) {
         val session = remote ?: return
-        val link = if (deepLink.contains("://")) deepLink else "market://launch?id=$deepLink"
+        val link = if (deepLink.contains("://") || deepLink.startsWith("intent:")) deepLink
+        else "market://launch?id=$deepLink"
         withContext(Dispatchers.IO) {
             try {
                 session.launchApp(link)
@@ -127,27 +124,5 @@ class TvRepositoryImpl @Inject constructor(
         _status.value = RemoteStatus()
     }
 
-    /** Alias for callers that expect close(). */
     fun close() = disconnect()
-
-    private companion object {
-        val KEY_NAMES: Map<String, Int> = mapOf(
-            "UP" to KeyEvent.KEYCODE_DPAD_UP,
-            "DOWN" to KeyEvent.KEYCODE_DPAD_DOWN,
-            "LEFT" to KeyEvent.KEYCODE_DPAD_LEFT,
-            "RIGHT" to KeyEvent.KEYCODE_DPAD_RIGHT,
-            "OK" to KeyEvent.KEYCODE_DPAD_CENTER,
-            "SELECT" to KeyEvent.KEYCODE_DPAD_CENTER,
-            "BACK" to KeyEvent.KEYCODE_BACK,
-            "HOME" to KeyEvent.KEYCODE_HOME,
-            "POWER" to KeyEvent.KEYCODE_POWER,
-            "VOL_UP" to KeyEvent.KEYCODE_VOLUME_UP,
-            "VOL_DOWN" to KeyEvent.KEYCODE_VOLUME_DOWN,
-            "MUTE" to KeyEvent.KEYCODE_VOLUME_MUTE,
-            "CH_UP" to KeyEvent.KEYCODE_CHANNEL_UP,
-            "CH_DOWN" to KeyEvent.KEYCODE_CHANNEL_DOWN,
-            "ASSIST" to KeyEvent.KEYCODE_ASSIST,
-            "SETTINGS" to KeyEvent.KEYCODE_SETTINGS,
-        )
-    }
 }
