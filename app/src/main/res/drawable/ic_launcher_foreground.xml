@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- remote body -->
+    <path
+        android:fillColor="#F2FFFFFF"
+        android:pathData="M49,24h10a9,9 0 0 1 9,9v42a9,9 0 0 1 -9,9h-10a9,9 0 0 1 -9,-9v-42a9,9 0 0 1 9,-9z" />
+    <!-- power dot -->
+    <path
+        android:fillColor="#FF5C6B"
+        android:pathData="M54,32.5m-3.4,0a3.4,3.4 0 1 1 6.8,0a3.4,3.4 0 1 1 -6.8,0" />
+    <!-- d-pad -->
+    <path
+        android:fillColor="#1B1E2B"
+        android:pathData="M54,50m-9,0a9,9 0 1 1 18,0a9,9 0 1 1 -18,0" />
+    <path
+        android:fillColor="#F2FFFFFF"
+        android:pathData="M54,50m-3.2,0a3.2,3.2 0 1 1 6.4,0a3.2,3.2 0 1 1 -6.4,0" />
+    <!-- buttons -->
+    <path
+        android:fillColor="#1B1E2B"
+        android:pathData="M48.5,68m-3,0a3,3 0 1 1 6,0a3,3 0 1 1 -6,0" />
+    <path
+        android:fillColor="#1B1E2B"
+        android:pathData="M59.5,68m-3,0a3,3 0 1 1 6,0a3,3 0 1 1 -6,0" />
+    <path
+        android:fillColor="#1B1E2B"
+        android:pathData="M48.5,77m-3,0a3,3 0 1 1 6,0a3,3 0 1 1 -6,0" />
+    <path
+        android:fillColor="#1B1E2B"
+        android:pathData="M59.5,77m-3,0a3,3 0 1 1 6,0a3,3 0 1 1 -6,0" />
+</vector>
