@@ -9,16 +9,22 @@ import android.net.wifi.WifiManager
 import android.view.KeyEvent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -27,23 +33,29 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.BlurredEdgeTreatment
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -55,11 +67,13 @@ import com.glassremote.data.ir.IrBlaster
 import com.glassremote.data.macro.MacroIds
 import com.glassremote.data.macro.MacroRunner
 import com.glassremote.data.macro.MacroStore
+import com.glassremote.data.network.ImeBridge
 import com.glassremote.data.repository.PairedDeviceStore
 import com.glassremote.domain.model.LinkPhase
 import com.glassremote.domain.model.RemoteStatus
 import com.glassremote.domain.model.TvDevice
 import com.glassremote.domain.repository.TvRepository
+import com.glassremote.ui.theme.LocalHaptics
 import com.glassremote.ui.theme.glass
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -73,6 +87,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.net.Inet4Address
@@ -80,6 +95,7 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import javax.inject.Inject
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 data class NetInfo(
     val wifi: Boolean = false,
@@ -105,6 +121,11 @@ class DashboardViewModel @Inject constructor(
     val device: StateFlow<TvDevice?> = store.lastDevice
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
+    /** Foreground app on the TV (package name), as reported over the remote link. */
+    val currentApp: StateFlow<String> = ImeBridge.state
+        .map { it.currentApp }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "")
+
     /** Polls every 5 s, only while the Dashboard is on screen. */
     val net: StateFlow<NetInfo> = device
         .flatMapLatest { d ->
@@ -118,27 +139,27 @@ class DashboardViewModel @Inject constructor(
         .flowOn(Dispatchers.IO)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), NetInfo())
 
-    // Brightness: slider movement -> backlight macro session on the TV.
+    // Backlight: each trigger is one Left/Right press inside a Settings → Picture → Backlight session.
     private val presses = Channel<Int>(Channel.UNLIMITED)
     private var sessionOpen = false
-    private var acc = 0
-    private var unitsPerPress = 1
+
+    @Volatile
+    private var opening = false
 
     init {
-        viewModelScope.launch { macros.unitsFlow.collect { unitsPerPress = it } }
         viewModelScope.launch {
             var closeJob: Job? = null
-            for (steps in presses) {
+            for (direction in presses) {
                 closeJob?.cancel()
                 if (!sessionOpen) {
+                    opening = true
                     runCatching { runner.run(macros.get(MacroIds.BACKLIGHT_OPEN)) }
                     sessionOpen = true
+                    opening = false
                 }
-                val code = if (steps > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
-                repeat(abs(steps)) {
-                    runCatching { repo.sendKey(code) }
-                    delay(120)
-                }
+                val code = if (direction > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
+                runCatching { repo.sendKey(code) }
+                delay(90)
                 closeJob = launch {
                     delay(3_000)
                     runCatching { runner.run(macros.get(MacroIds.BACKLIGHT_CLOSE)) }
@@ -148,14 +169,15 @@ class DashboardViewModel @Inject constructor(
         }
     }
 
-    /** [delta] is slider units moved since the last call (positive = brighter). */
-    fun nudgeBrightness(delta: Int) {
-        acc += delta
-        val steps = acc / unitsPerPress
-        if (steps != 0) {
-            acc -= steps * unitsPerPress
-            presses.trySend(steps)
-        }
+    /** +1 = brighter, -1 = dimmer. Ignored while the TV menu is still opening. */
+    fun stepBacklight(direction: Int) {
+        if (opening) return
+        presses.trySend(direction)
+    }
+
+    /** Finger lifted: drop anything still queued so nothing fires after release. */
+    fun releaseBacklight() {
+        while (presses.tryReceive().isSuccess) Unit
     }
 
     private fun measure(d: TvDevice?): NetInfo {
@@ -189,11 +211,25 @@ class DashboardViewModel @Inject constructor(
     }
 }
 
+private fun appLabel(pkg: String): String = when {
+    pkg.isBlank() -> ""
+    pkg.contains("tvmusic") -> "YouTube Music"
+    pkg.contains("youtube.tv") -> "YouTube"
+    pkg == "com.stremio.one" -> "Stremio"
+    pkg.startsWith("com.netflix") -> "Netflix"
+    pkg.contains("amazonvideo") -> "Prime Video"
+    pkg.contains("spotify") -> "Spotify"
+    pkg.contains("launcher") -> "Home screen"
+    pkg.contains("settings") -> "Settings"
+    else -> pkg.substringAfterLast('.')
+}
+
 @Composable
 fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
     val status by vm.status.collectAsStateWithLifecycle()
     val device by vm.device.collectAsStateWithLifecycle()
     val net by vm.net.collectAsStateWithLifecycle()
+    val currentApp by vm.currentApp.collectAsStateWithLifecycle()
     val ctx = LocalContext.current
 
     var hasLocation by remember {
@@ -227,7 +263,7 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         Text("Dashboard", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-        NowPlaying()
+        NowPlaying(appLabel(currentApp))
 
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             StatTile("Link", linkText, Modifier.weight(1f), linkColor)
@@ -271,46 +307,121 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
             )
         }
 
-        BrightnessCard { delta -> vm.nudgeBrightness(delta) }
+        SpringBacklightCard(
+            onStep = { vm.stepBacklight(it) },
+            onRelease = { vm.releaseBacklight() },
+        )
     }
 }
 
+/** Centre-resting slider: drag away from the middle to repeat +/- steps; it springs back on release. */
 @Composable
-private fun BrightnessCard(onDelta: (Int) -> Unit) {
-    var level by remember { mutableFloatStateOf(50f) }
-    var last by remember { mutableFloatStateOf(50f) }
+private fun SpringBacklightCard(onStep: (Int) -> Unit, onRelease: () -> Unit) {
+    val haptics = LocalHaptics.current
+    val deflection = remember { Animatable(0f) } // -1 (full minus) .. +1 (full plus)
+    var dragging by remember { mutableStateOf(false) }
+    var trackWidthPx by remember { mutableFloatStateOf(0f) }
+    val scope = rememberCoroutineScope()
+    val step by rememberUpdatedState(onStep)
+    val release by rememberUpdatedState(onRelease)
+    val thumb = 44.dp
+    val thumbPx = with(LocalDensity.current) { thumb.toPx() }
+
+    // While held away from centre: one step per interval, faster the further you pull.
+    LaunchedEffect(dragging) {
+        var atLimit = false
+        while (dragging) {
+            val d = deflection.value
+            val mag = abs(d)
+            if (mag > 0.08f) {
+                if (mag >= 0.97f) {
+                    if (!atLimit) {
+                        haptics?.heavyClick()
+                        atLimit = true
+                    } else {
+                        haptics?.rumble()
+                    }
+                } else {
+                    atLimit = false
+                    haptics?.tick()
+                }
+                step(if (d > 0f) 1 else -1)
+                delay((620f - 510f * mag).toLong()) // ~620 ms near centre, ~110 ms at the ends
+            } else {
+                atLimit = false
+                delay(40)
+            }
+        }
+    }
+
+    fun snapBack() {
+        dragging = false
+        release()
+        scope.launch {
+            deflection.animateTo(
+                0f,
+                spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
+            )
+        }
+    }
+
     Column(
         Modifier.fillMaxWidth().glass(RoundedCornerShape(24.dp)).padding(18.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Text("TV backlight", color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp)
-        Slider(
-            value = level,
-            onValueChange = { new ->
-                level = new
-                val delta = (new - last).toInt()
-                if (delta != 0) {
-                    onDelta(delta)
-                    last += delta
-                }
-            },
-            valueRange = 0f..100f,
-            colors = SliderDefaults.colors(
-                thumbColor = Color.White,
-                activeTrackColor = Color.White.copy(alpha = 0.8f),
-                inactiveTrackColor = Color.White.copy(alpha = 0.2f),
-            ),
-        )
+        Row(
+            Modifier.fillMaxWidth().height(52.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text("−", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Medium)
+            Box(
+                Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .clip(CircleShape)
+                    .background(Color.White.copy(alpha = 0.10f))
+                    .onSizeChanged { trackWidthPx = it.width.toFloat() }
+                    .pointerInput(Unit) {
+                        detectHorizontalDragGestures(
+                            onDragStart = {
+                                dragging = true
+                                scope.launch { deflection.stop() }
+                            },
+                            onDragEnd = { snapBack() },
+                            onDragCancel = { snapBack() },
+                            onHorizontalDrag = { change, dragAmount ->
+                                change.consume()
+                                val half = ((trackWidthPx - thumbPx) / 2f).coerceAtLeast(1f)
+                                scope.launch {
+                                    deflection.snapTo((deflection.value + dragAmount / half).coerceIn(-1f, 1f))
+                                }
+                            },
+                        )
+                    },
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(Modifier.width(2.dp).height(22.dp).background(Color.White.copy(alpha = 0.35f)))
+                Box(
+                    Modifier
+                        .offset { IntOffset((deflection.value * ((trackWidthPx - thumbPx) / 2f)).roundToInt(), 0) }
+                        .size(thumb)
+                        .background(Color.White.copy(alpha = 0.92f), CircleShape)
+                )
+            }
+            Text("+", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Medium)
+        }
         Text(
-            "Opens Settings → Picture → Backlight on the TV, then nudges it as you drag. " +
-                "Relative control: the starting position isn't read from the TV. Edit the steps in the Macros tab.",
+            "Drag right for brighter, left for dimmer. The further you pull, the faster it steps. " +
+                "It springs back to centre on release. Steps are edited in the Macros tab.",
             color = Color.White.copy(alpha = 0.45f), fontSize = 11.sp,
         )
     }
 }
 
 @Composable
-private fun NowPlaying() {
+private fun NowPlaying(app: String) {
     Box(Modifier.fillMaxWidth().height(170.dp).glass(RoundedCornerShape(28.dp))) {
         Box(
             Modifier.align(Alignment.CenterStart).padding(16.dp).size(110.dp)
@@ -324,10 +435,16 @@ private fun NowPlaying() {
             Modifier.align(Alignment.CenterStart).padding(start = 148.dp, end = 16.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text("NOW PLAYING", color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp)
-            Text("Nothing reported", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
             Text(
-                "This TV link doesn't share media info yet",
+                if (app.isBlank()) "NOW PLAYING" else "ON THE TV",
+                color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp,
+            )
+            Text(
+                app.ifBlank { "Nothing reported" },
+                color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
+            )
+            Text(
+                "Titles and artwork aren't shared by the TV link",
                 color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp,
             )
         }
