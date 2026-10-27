@@ -1,11 +1,14 @@
 package com.glassremote.ui.remote
 
+import android.view.KeyEvent
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.glassremote.data.macro.MacroIds
 import com.glassremote.data.macro.MacroRecorder
 import com.glassremote.data.macro.MacroRunner
 import com.glassremote.data.macro.MacroStore
+import com.glassremote.data.network.ImeBridge
+import com.glassremote.data.network.ImeInfo
 import com.glassremote.data.repository.PairedDeviceStore
 import com.glassremote.domain.model.KeyDirection
 import com.glassremote.domain.model.LinkPhase
@@ -13,9 +16,13 @@ import com.glassremote.domain.model.RemoteStatus
 import com.glassremote.domain.model.TvDevice
 import com.glassremote.domain.repository.TvRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -41,6 +48,14 @@ class RemoteViewModel @Inject constructor(
         .map { it?.name ?: "" }
         .stateIn(viewModelScope, SharingStarted.Eagerly, "")
 
+    /** TV text-field state, used by the Keypad. */
+    val ime: StateFlow<ImeInfo> = ImeBridge.state
+
+    private val _replaceMode = MutableStateFlow(true)
+    val replaceMode: StateFlow<Boolean> = _replaceMode.asStateFlow()
+
+    private var typed = ""
+
     init {
         reconnect()
         // If the TV drops the link, quietly reconnect up to 3 times.
@@ -57,6 +72,13 @@ class RemoteViewModel @Inject constructor(
                     else -> Unit
                 }
             }
+        }
+        // New text field on the TV: start our buffer from what it already contains.
+        viewModelScope.launch {
+            ImeBridge.state
+                .map { it.active to it.label }
+                .distinctUntilChanged()
+                .collect { typed = ImeBridge.state.value.value }
         }
     }
 
@@ -80,7 +102,6 @@ class RemoteViewModel @Inject constructor(
         viewModelScope.launch { runCatching { runner.run(macros.get(id)) } }
     }
 
-    /** Direct link when no Stremio macro is saved, otherwise the macro. */
     fun openStremio() {
         viewModelScope.launch {
             val macro = macros.get(MacroIds.STREMIO)
@@ -89,6 +110,49 @@ class RemoteViewModel @Inject constructor(
                 else runner.run(macro)
             }
         }
+    }
+
+    // ---- Keypad text input ----
+
+    fun toggleReplaceMode() { _replaceMode.value = !_replaceMode.value }
+
+    fun typeChar(ch: Char) {
+        val c = ch.lowercaseChar()
+        if (ImeBridge.state.value.active) {
+            if (_replaceMode.value) {
+                typed += c.toString()
+                sendText(typed)
+            } else {
+                sendText(c.toString())
+            }
+        } else {
+            keyForChar(c)?.let { key(it) }
+        }
+    }
+
+    fun backspace() {
+        if (ImeBridge.state.value.active && _replaceMode.value && typed.isNotEmpty()) {
+            typed = typed.dropLast(1)
+            sendText(typed)
+        } else {
+            key(KeyEvent.KEYCODE_DEL)
+        }
+    }
+
+    fun submitText() {
+        typed = ""
+        key(KeyEvent.KEYCODE_ENTER)
+    }
+
+    private fun keyForChar(c: Char): Int? = when (c) {
+        ' ' -> KeyEvent.KEYCODE_SPACE
+        in '0'..'9' -> KeyEvent.KEYCODE_0 + (c - '0')
+        in 'a'..'z' -> KeyEvent.KEYCODE_A + (c - 'a')
+        else -> null
+    }
+
+    private fun sendText(text: String) {
+        viewModelScope.launch(Dispatchers.IO) { runCatching { ImeBridge.sendText(text) } }
     }
 
     fun forget() {
