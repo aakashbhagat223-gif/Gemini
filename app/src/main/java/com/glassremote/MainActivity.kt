@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.Dashboard
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SettingsRemote
@@ -54,8 +55,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.glassremote.data.bluetooth.BluetoothHidController
 import com.glassremote.data.macro.MacroIds
 import com.glassremote.ui.dashboard.DashboardScreen
+import com.glassremote.ui.link.LinkScreen
 import com.glassremote.ui.macros.MacrosScreen
 import com.glassremote.ui.macros.MacrosViewModel
 import com.glassremote.ui.pairing.PairingScreen
@@ -75,6 +78,7 @@ import javax.inject.Inject
 class MainActivity : ComponentActivity() {
 
     @Inject lateinit var haptics: Haptics
+    @Inject lateinit var bluetooth: BluetoothHidController
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -82,6 +86,7 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
         )
+        bluetooth.start() // registers as a Bluetooth remote if permission is already granted
         setContent {
             val settingsVm: SettingsViewModel = hiltViewModel()
             val style by settingsVm.style.collectAsStateWithLifecycle()
@@ -109,7 +114,6 @@ private fun AppRoot(settingsVm: SettingsViewModel) {
     val recording by macrosVm.recording.collectAsStateWithLifecycle()
     var tab by rememberSaveable { mutableIntStateOf(0) }
 
-    // Recording happens on the Remote tab.
     LaunchedEffect(recording) { if (recording != null) tab = 0 }
 
     when (saved) {
@@ -121,7 +125,8 @@ private fun AppRoot(settingsVm: SettingsViewModel) {
                     when (tab) {
                         0 -> RemoteScreen(remoteVm)
                         1 -> DashboardScreen()
-                        2 -> MacrosScreen(macrosVm)
+                        2 -> LinkScreen()
+                        3 -> MacrosScreen(macrosVm)
                         else -> SettingsScreen(settingsVm)
                     }
                 }
@@ -160,6 +165,7 @@ private fun BottomNav(tab: Int, onSelect: (Int) -> Unit) {
     val items = listOf(
         "Remote" to Icons.Rounded.SettingsRemote,
         "Dashboard" to Icons.Rounded.Dashboard,
+        "Link" to Icons.Rounded.Bluetooth,
         "Macros" to Icons.Rounded.Tune,
         "Settings" to Icons.Rounded.Settings,
     )
