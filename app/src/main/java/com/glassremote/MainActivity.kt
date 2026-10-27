@@ -64,12 +64,18 @@ import com.glassremote.ui.remote.RemoteViewModel
 import com.glassremote.ui.settings.SettingsScreen
 import com.glassremote.ui.settings.SettingsViewModel
 import com.glassremote.ui.theme.GlassBackground
+import com.glassremote.ui.theme.Haptics
 import com.glassremote.ui.theme.LocalGlassStyle
+import com.glassremote.ui.theme.LocalHaptics
 import com.glassremote.ui.theme.glass
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+
+    @Inject lateinit var haptics: Haptics
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge(
@@ -82,6 +88,7 @@ class MainActivity : ComponentActivity() {
             val base = LocalDensity.current
             CompositionLocalProvider(
                 LocalGlassStyle provides style,
+                LocalHaptics provides haptics,
                 LocalDensity provides Density(base.density, base.fontScale * style.fontScale),
             ) {
                 MaterialTheme(colorScheme = darkColorScheme()) {
