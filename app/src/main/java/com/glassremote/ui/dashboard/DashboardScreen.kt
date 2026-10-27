@@ -65,6 +65,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.glassremote.data.adb.AdbManager
 import com.glassremote.data.adb.AdbState
+import com.glassremote.data.adb.NativeActions
 import com.glassremote.data.adb.NowPlaying
 import com.glassremote.data.adb.NowPlayingRepository
 import com.glassremote.data.ir.IrBlaster
@@ -86,8 +87,10 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -117,7 +120,8 @@ class DashboardViewModel @Inject constructor(
     private val macros: MacroStore,
     private val runner: MacroRunner,
     nowPlayingRepo: NowPlayingRepository,
-    adb: AdbManager,
+    private val adb: AdbManager,
+    private val actions: NativeActions,
     @ApplicationContext private val ctx: Context,
 ) : ViewModel() {
 
@@ -145,13 +149,38 @@ class DashboardViewModel @Inject constructor(
         .flowOn(Dispatchers.IO)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), NetInfo())
 
-    private val presses = Channel<Int>(Channel.UNLIMITED)
+    // ---- Backlight ----
+    private val _backlight = MutableStateFlow<Int?>(null)
+    val backlight: StateFlow<Int?> = _backlight.asStateFlow()
+
+    private val deltas = Channel<Int>(Channel.UNLIMITED)  // native mode: signed backlight steps
+    private val presses = Channel<Int>(Channel.UNLIMITED) // macro fallback: +1 / -1 key presses
+    private var baseBacklight: Int? = null
+    private var nativeBacklight = true
     private var sessionOpen = false
 
     @Volatile
     private var opening = false
 
     init {
+        // Native: batch whatever steps piled up and write the TV's backlight setting once.
+        viewModelScope.launch {
+            for (first in deltas) {
+                var sum = first
+                while (true) {
+                    val n = deltas.tryReceive().getOrNull() ?: break
+                    sum += n
+                }
+                runCatching {
+                    val current = baseBacklight ?: actions.readBacklight() ?: 50
+                    val next = (current + sum).coerceIn(0, 100)
+                    actions.writeBacklight(next)
+                    baseBacklight = next
+                    _backlight.value = next
+                }
+            }
+        }
+        // Fallback: menu macros plus Left/Right presses.
         viewModelScope.launch {
             var closeJob: Job? = null
             for (direction in presses) {
@@ -174,9 +203,29 @@ class DashboardViewModel @Inject constructor(
         }
     }
 
-    fun stepBacklight(direction: Int) {
-        if (opening) return
-        presses.trySend(direction)
+    /** Reads the TV's current backlight (ADB) and whether native mode is switched on. */
+    fun refreshBacklight() {
+        viewModelScope.launch {
+            nativeBacklight = actions.nativeBacklightEnabled()
+            if (adb.state.value.connected && nativeBacklight) {
+                runCatching { actions.readBacklight() }.getOrNull()?.let {
+                    baseBacklight = it
+                    _backlight.value = it
+                }
+            }
+        }
+    }
+
+    /** direction +1/-1, magnitude 0..1 (how far the handle is pulled). */
+    fun stepBacklight(direction: Int, magnitude: Float) {
+        if (adb.state.value.connected && nativeBacklight) {
+            val delta = direction * (1 + (magnitude * 5f).toInt())
+            _backlight.value = ((_backlight.value ?: 50) + delta).coerceIn(0, 100)
+            deltas.trySend(delta)
+        } else {
+            if (opening) return
+            presses.trySend(direction)
+        }
     }
 
     fun releaseBacklight() {
@@ -235,7 +284,10 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
     val currentApp by vm.currentApp.collectAsStateWithLifecycle()
     val nowPlaying by vm.nowPlaying.collectAsStateWithLifecycle()
     val adbState by vm.adbState.collectAsStateWithLifecycle()
+    val backlight by vm.backlight.collectAsStateWithLifecycle()
     val ctx = LocalContext.current
+
+    LaunchedEffect(adbState.connected) { vm.refreshBacklight() }
 
     var hasLocation by remember {
         mutableStateOf(
@@ -294,9 +346,10 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
                 onClick = if (!hasLocation) ({ askLocation.launch(Manifest.permission.ACCESS_FINE_LOCATION) }) else null,
             )
             StatTile(
-                "IR blaster",
-                if (vm.irSupported) "Available" else "Not supported",
+                "ADB",
+                if (adbState.connected) "Connected" else "Off",
                 Modifier.weight(1f),
+                if (adbState.connected) Color(0xFF34D399) else Color(0xFFF87171),
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -311,16 +364,29 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
                 Modifier.weight(1f),
             )
         }
+        Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            StatTile(
+                "IR blaster",
+                if (vm.irSupported) "Available" else "Not supported",
+                Modifier.weight(1f),
+            )
+            StatTile("Backlight", backlight?.toString() ?: "—", Modifier.weight(1f))
+        }
 
         SpringBacklightCard(
-            onStep = { vm.stepBacklight(it) },
+            backlight = backlight,
+            onStep = { dir, mag -> vm.stepBacklight(dir, mag) },
             onRelease = { vm.releaseBacklight() },
         )
     }
 }
 
 @Composable
-private fun SpringBacklightCard(onStep: (Int) -> Unit, onRelease: () -> Unit) {
+private fun SpringBacklightCard(
+    backlight: Int?,
+    onStep: (Int, Float) -> Unit,
+    onRelease: () -> Unit,
+) {
     val haptics = LocalHaptics.current
     val deflection = remember { Animatable(0f) }
     var dragging by remember { mutableStateOf(false) }
@@ -348,7 +414,7 @@ private fun SpringBacklightCard(onStep: (Int) -> Unit, onRelease: () -> Unit) {
                     atLimit = false
                     haptics?.tick()
                 }
-                step(if (d > 0f) 1 else -1)
+                step(if (d > 0f) 1 else -1, mag)
                 delay((620f - 510f * mag).toLong())
             } else {
                 atLimit = false
@@ -372,7 +438,10 @@ private fun SpringBacklightCard(onStep: (Int) -> Unit, onRelease: () -> Unit) {
         Modifier.fillMaxWidth().glass(RoundedCornerShape(24.dp)).padding(18.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text("TV backlight", color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp)
+        Text(
+            if (backlight != null) "TV backlight · $backlight" else "TV backlight",
+            color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp,
+        )
         Row(
             Modifier.fillMaxWidth().height(52.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -416,8 +485,8 @@ private fun SpringBacklightCard(onStep: (Int) -> Unit, onRelease: () -> Unit) {
             Text("+", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Medium)
         }
         Text(
-            "Drag right for brighter, left for dimmer. The further you pull, the faster it steps. " +
-                "It springs back to centre on release. Steps are edited in the Macros tab.",
+            "Drag right for brighter, left for dimmer; further is faster. It springs back on release. " +
+                "With ADB it sets the TV's backlight value directly.",
             color = Color.White.copy(alpha = 0.45f), fontSize = 11.sp,
         )
     }
