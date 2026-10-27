@@ -8,20 +8,27 @@ import android.net.ConnectivityManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Switch
@@ -31,6 +38,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,14 +69,18 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
+import org.json.JSONObject
+import java.net.HttpURLConnection
 import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.URL
 import javax.inject.Inject
 
 @HiltViewModel
@@ -76,7 +88,7 @@ class LinkViewModel @Inject constructor(
     val bt: BluetoothHidController,
     val adb: AdbManager,
     private val actions: NativeActions,
-    store: PairedDeviceStore,
+    private val store: PairedDeviceStore,
     @ApplicationContext private val ctx: Context,
 ) : ViewModel() {
 
@@ -101,12 +113,30 @@ class LinkViewModel @Inject constructor(
     private val _scanning = MutableStateFlow(false)
     val scanning: StateFlow<Boolean> = _scanning.asStateFlow()
 
+    private val _nativeBacklight = MutableStateFlow(true)
+    val nativeBacklight: StateFlow<Boolean> = _nativeBacklight.asStateFlow()
+
     init {
-        viewModelScope.launch { _hdmi2.value = actions.savedHdmi2() }
+        viewModelScope.launch {
+            _hdmi2.value = actions.savedHdmi2()
+            _nativeBacklight.value = actions.nativeBacklightEnabled()
+        }
         refreshBt()
     }
 
+    fun setNativeBacklight(on: Boolean) {
+        viewModelScope.launch {
+            actions.setNativeBacklight(on)
+            _nativeBacklight.value = on
+        }
+    }
+
     fun refreshBt() { _btDevices.value = bt.bondedInfo() }
+
+    fun restartBt() {
+        viewModelScope.launch(Dispatchers.IO) { bt.restart() }
+        refreshBt()
+    }
 
     fun connectBt(address: String) {
         viewModelScope.launch(Dispatchers.IO) { bt.connectTo(address) }
@@ -127,7 +157,7 @@ class LinkViewModel @Inject constructor(
         }
     }
 
-    fun testAdb() = run("Testing") { adb.shell("getprop ro.product.model") }
+    fun testAdb() = run("Testing") { actions.let { adb.shell("getprop ro.product.model") } }
 
     fun launchStremio() = run("Launching Stremio") { actions.launchPackage("com.stremio.one") }
 
@@ -167,26 +197,50 @@ class LinkViewModel @Inject constructor(
         }
     }
 
-    /** Probes the phone's /24 for the Android TV remote (6466), ADB (5555) and Cast (8009/8008) ports. */
+    private fun castName(host: String): String? = try {
+        val c = URL("http://$host:8008/setup/eureka_info?params=name").openConnection() as HttpURLConnection
+        c.connectTimeout = 1_500
+        c.readTimeout = 1_500
+        try {
+            JSONObject(c.inputStream.bufferedReader().readText()).optString("name").ifBlank { null }
+        } finally {
+            c.disconnect()
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    /** Probes the phone's /24 for remote (6466), ADB (5555) and Cast (8009/8008) ports. */
     private suspend fun scanSubnet(): List<String> = coroutineScope {
         val cm = ctx.getSystemService(ConnectivityManager::class.java)
         val ip = cm.getLinkProperties(cm.activeNetwork)?.linkAddresses
             ?.firstOrNull { it.address is Inet4Address }?.address?.hostAddress
             ?: return@coroutineScope emptyList()
         val prefix = ip.substringBeforeLast('.')
+        val tvHost = store.lastDevice.first()?.host
         val ports = listOf(6466, 5555, 8009, 8008)
-        val gate = Semaphore(48)
+        val gate = Semaphore(40)
         (1..254).map { n ->
             async {
                 gate.withPermit {
                     val host = "$prefix.$n"
+                    if (host == ip) return@withPermit null
                     val open = ports.filter { p ->
                         runCatching {
-                            Socket().use { it.connect(InetSocketAddress(host, p), 350) }
+                            Socket().use { it.connect(InetSocketAddress(host, p), 700) }
                             true
                         }.getOrDefault(false)
                     }
-                    if (open.isEmpty()) null else "$host  ports ${open.joinToString()}"
+                    if (open.isEmpty()) {
+                        null
+                    } else {
+                        val name = if (8008 in open) castName(host) else null
+                        buildString {
+                            append(host).append("  ports ").append(open.joinToString())
+                            if (name != null) append("  ·  ").append(name)
+                            if (host == tvHost) append("  (your TV)")
+                        }
+                    }
                 }
             }
         }.awaitAll().filterNotNull()
@@ -206,6 +260,7 @@ fun LinkScreen(vm: LinkViewModel = hiltViewModel()) {
     val hdmi2 by vm.hdmi2.collectAsStateWithLifecycle()
     val scan by vm.scan.collectAsStateWithLifecycle()
     val scanning by vm.scanning.collectAsStateWithLifecycle()
+    val nativeBacklight by vm.nativeBacklight.collectAsStateWithLifecycle()
 
     var host by remember(device) { mutableStateOf(device?.host ?: "") }
     var port by remember { mutableStateOf("5555") }
@@ -234,7 +289,7 @@ fun LinkScreen(vm: LinkViewModel = hiltViewModel()) {
             )
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Switch(checked = prefer, onCheckedChange = { vm.bt.setPrefer(it) })
-                Text("Prefer Bluetooth (use when Wi-Fi is unstable)", color = Color.White, fontSize = 13.sp)
+                Text("Send keys over Bluetooth when connected", color = Color.White, fontSize = 13.sp)
             }
             Row {
                 LinkButton("Enable") {
@@ -245,7 +300,8 @@ fun LinkScreen(vm: LinkViewModel = hiltViewModel()) {
                         vm.refreshBt()
                     }
                 }
-                LinkButton("Make discoverable") {
+                LinkButton("Re-register") { vm.restartBt() }
+                LinkButton("Discoverable") {
                     ctx.startActivity(
                         Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE)
                             .putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 180)
@@ -253,14 +309,16 @@ fun LinkScreen(vm: LinkViewModel = hiltViewModel()) {
                 }
                 LinkButton("Refresh") { vm.refreshBt() }
             }
-            Text(
-                "Setup: tap Enable, then Make discoverable. On the TV open Settings → Remotes & accessories → " +
-                    "Add accessory and pick this phone. Then tap the TV below to connect.",
-                color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp,
+            InfoToggle(
+                "Setup: tap Enable until the message says Registered. Then tap Discoverable and, on the " +
+                    "TV, go to Settings → Remotes & accessories → Add accessory and pick this phone. " +
+                    "Back here, tap the TV (or the Jio box) in the list to connect. With the switch on, the " +
+                    "Remote tab sends keys to whichever device is connected over Bluetooth, which is how " +
+                    "you can drive the Jio box."
             )
             btDevices.forEach { (name, address) ->
                 Text(
-                    name,
+                    if (btState.connectedName == name) "$name  ✓" else name,
                     color = Color.White, fontSize = 14.sp,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -270,7 +328,7 @@ fun LinkScreen(vm: LinkViewModel = hiltViewModel()) {
             }
         }
 
-        Section("ADB (native actions + Now Playing)") {
+        Section("ADB (native actions, typing, Now Playing)") {
             Text(adbState.message, color = Color.White.copy(alpha = 0.7f), fontSize = 13.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
@@ -288,14 +346,18 @@ fun LinkScreen(vm: LinkViewModel = hiltViewModel()) {
                 LinkButton("Test") { vm.testAdb() }
                 LinkButton("Disconnect") { vm.adb.disconnect() }
             }
-            Text(
+            InfoToggle(
                 "Turn on USB debugging in the TV's Developer options first. Accept the prompt on the TV " +
-                    "the first time.",
-                color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp,
+                    "and tick Always allow. Once connected it reconnects by itself (also if the TV's IP " +
+                    "changes). Disconnect turns that off."
             )
         }
 
         Section("Native actions (needs ADB)") {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Switch(checked = nativeBacklight, onCheckedChange = { vm.setNativeBacklight(it) })
+                Text("Backlight slider sets the TV value directly", color = Color.White, fontSize = 13.sp)
+            }
             Row {
                 LinkButton("Launch Stremio") { vm.launchStremio() }
                 LinkButton("Scan HDMI inputs") { vm.scanInputs() }
@@ -323,11 +385,33 @@ fun LinkScreen(vm: LinkViewModel = hiltViewModel()) {
             Row {
                 LinkButton(if (scanning) "Scanning…" else "Scan network") { vm.scanNetwork() }
             }
-            Text(
-                "Lists devices on your Wi-Fi with open remote (6466), ADB (5555) or Cast (8009/8008) ports.",
-                color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp,
+            InfoToggle(
+                "Lists devices on your Wi-Fi with open remote (6466), ADB (5555) or Cast (8009/8008) " +
+                    "ports. Cast devices also show their name."
             )
             scan.forEach { Text(it, color = Color.White, fontSize = 13.sp) }
+        }
+    }
+}
+
+/** Info text that stays hidden until tapped. */
+@Composable
+private fun InfoToggle(text: String) {
+    var open by rememberSaveable { mutableStateOf(false) }
+    Column {
+        Row(
+            Modifier.clickable { open = !open }.padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Rounded.Info, contentDescription = null,
+                tint = Color.White.copy(alpha = 0.5f), modifier = Modifier.size(16.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(if (open) "Hide info" else "Info", color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp)
+        }
+        AnimatedVisibility(visible = open) {
+            Text(text, color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp, modifier = Modifier.padding(top = 4.dp))
         }
     }
 }
