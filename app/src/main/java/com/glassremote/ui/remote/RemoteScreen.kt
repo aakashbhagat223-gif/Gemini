@@ -74,8 +74,10 @@ import androidx.compose.ui.window.Dialog
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.glassremote.data.macro.MacroIds
+import com.glassremote.data.network.ImeInfo
 import com.glassremote.domain.model.LinkPhase
 import com.glassremote.domain.model.RemoteStatus
+import com.glassremote.ui.theme.LocalHaptics
 import com.glassremote.ui.theme.glass
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -98,6 +100,8 @@ private val APPS = listOf(
 fun RemoteScreen(vm: RemoteViewModel = hiltViewModel()) {
     val status by vm.status.collectAsStateWithLifecycle()
     val name by vm.deviceName.collectAsStateWithLifecycle()
+    val ime by vm.ime.collectAsStateWithLifecycle()
+    val replaceMode by vm.replaceMode.collectAsStateWithLifecycle()
     val press: (Int) -> Unit = { vm.key(it) }
     var mode by rememberSaveable { mutableIntStateOf(0) } // 0 wheel, 1 trackpad, 2 keypad
     var showApps by rememberSaveable { mutableStateOf(false) }
@@ -117,7 +121,15 @@ fun RemoteScreen(vm: RemoteViewModel = hiltViewModel()) {
 
             if (mode == 2) {
                 NavRow(press)
-                Keypad(press)
+                Keypad(
+                    ime = ime,
+                    replaceMode = replaceMode,
+                    onToggleMode = { vm.toggleReplaceMode() },
+                    onChar = { vm.typeChar(it) },
+                    onBackspace = { vm.backspace() },
+                    onGo = { vm.submitText() },
+                    onArrow = press,
+                )
             } else {
                 if (mode == 1) Trackpad(press) else DPad(press)
                 NavRow(press)
@@ -318,39 +330,71 @@ private fun Trackpad(press: (Int) -> Unit) {
     }
 }
 
-/** QWERTY keys are sent as normal key presses, so any focused TV search box accepts them. */
+/**
+ * Text goes over the TV's text-input channel when the TV reports a focused text field;
+ * otherwise each key is sent as a normal key press.
+ */
 @Composable
-private fun Keypad(press: (Int) -> Unit) {
+private fun Keypad(
+    ime: ImeInfo,
+    replaceMode: Boolean,
+    onToggleMode: () -> Unit,
+    onChar: (Char) -> Unit,
+    onBackspace: () -> Unit,
+    onGo: () -> Unit,
+    onArrow: (Int) -> Unit,
+) {
     val rows = listOf("1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM")
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                if (ime.active) "TV field: " + ime.label.ifBlank { "text input" } + " · \"" + ime.value + "\""
+                else "No TV text field reported · sending key presses",
+                color = Color.White.copy(alpha = 0.55f),
+                fontSize = 12.sp,
+                maxLines = 1,
+                modifier = Modifier.weight(1f),
+            )
+            if (ime.active) {
+                Text(
+                    if (replaceMode) "Replace" else "Insert",
+                    color = Color.White,
+                    fontSize = 12.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color.White.copy(alpha = 0.14f))
+                        .clickable(onClick = onToggleMode)
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                )
+            }
+        }
         rows.forEachIndexed { index, row ->
             Row(
                 Modifier.fillMaxWidth().padding(horizontal = if (index == 2) 14.dp else 0.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                row.forEach { ch ->
-                    val code = if (ch in '0'..'9') KeyEvent.KEYCODE_0 + (ch - '0') else KeyEvent.KEYCODE_A + (ch - 'A')
-                    Cap(ch.toString(), Modifier.weight(1f)) { press(code) }
-                }
-                if (index == 3) {
-                    Cap("⌫", Modifier.weight(1.6f), repeat = true) { press(KeyEvent.KEYCODE_DEL) }
-                }
+                row.forEach { ch -> Cap(ch.toString(), Modifier.weight(1f)) { onChar(ch) } }
+                if (index == 3) Cap("⌫", Modifier.weight(1.6f), repeat = true) { onBackspace() }
             }
         }
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Cap("←", Modifier.weight(1f)) { press(KeyEvent.KEYCODE_DPAD_LEFT) }
-            Cap("↑", Modifier.weight(1f)) { press(KeyEvent.KEYCODE_DPAD_UP) }
-            Cap("↓", Modifier.weight(1f)) { press(KeyEvent.KEYCODE_DPAD_DOWN) }
-            Cap("→", Modifier.weight(1f)) { press(KeyEvent.KEYCODE_DPAD_RIGHT) }
-            Cap("space", Modifier.weight(2.2f)) { press(KeyEvent.KEYCODE_SPACE) }
-            Cap("Go", Modifier.weight(1.3f)) { press(KeyEvent.KEYCODE_ENTER) }
+            Cap("←", Modifier.weight(1f)) { onArrow(KeyEvent.KEYCODE_DPAD_LEFT) }
+            Cap("↑", Modifier.weight(1f)) { onArrow(KeyEvent.KEYCODE_DPAD_UP) }
+            Cap("↓", Modifier.weight(1f)) { onArrow(KeyEvent.KEYCODE_DPAD_DOWN) }
+            Cap("→", Modifier.weight(1f)) { onArrow(KeyEvent.KEYCODE_DPAD_RIGHT) }
+            Cap("space", Modifier.weight(2.2f)) { onChar(' ') }
+            Cap("Go", Modifier.weight(1.3f)) { onGo() }
         }
     }
 }
 
 @Composable
 private fun Cap(label: String, modifier: Modifier, repeat: Boolean = false, onTap: () -> Unit) {
-    KeyButton(modifier.height(46.dp), RoundedCornerShape(12.dp), repeat = repeat, onPressed = onTap) {
+    KeyButton(modifier.height(46.dp), RoundedCornerShape(12.dp), repeat = repeat, crisp = true, onPressed = onTap) {
         Text(label, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
     }
 }
@@ -441,6 +485,7 @@ private fun KeyButton(
     modifier: Modifier,
     shape: Shape,
     repeat: Boolean = false,
+    crisp: Boolean = false,
     onPressed: () -> Unit,
     content: @Composable BoxScope.() -> Unit,
 ) {
@@ -450,27 +495,33 @@ private fun KeyButton(
         modifier
             .scale(scale)
             .glass(shape, strong = pressed)
-            .holdKey(repeat, onPressed) { pressed = it },
+            .holdKey(repeat, onPressed, crisp) { pressed = it },
         contentAlignment = Alignment.Center,
         content = content,
     )
 }
 
-/** Fires on touch-down with a haptic tick; if [repeat], keeps firing while held. */
+/**
+ * Fires on touch-down; if [repeat], keeps firing while held.
+ * [crisp] uses the short vibration tick (keyboard); otherwise the standard system haptic.
+ */
 @Composable
 private fun Modifier.holdKey(
     repeat: Boolean,
     onPressed: () -> Unit,
+    crisp: Boolean = false,
     onDown: (Boolean) -> Unit = {},
 ): Modifier {
     val scope = rememberCoroutineScope()
-    val haptic = LocalHapticFeedback.current
+    val systemHaptic = LocalHapticFeedback.current
+    val haptics = LocalHaptics.current
     val current by rememberUpdatedState(onPressed)
     val downCallback by rememberUpdatedState(onDown)
-    return pointerInput(repeat) {
+    return pointerInput(repeat, crisp) {
         detectTapGestures(onPress = {
             downCallback(true)
-            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            if (crisp && haptics != null) haptics.tick()
+            else systemHaptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
             current()
             val job = if (repeat) scope.launch {
                 delay(450)
