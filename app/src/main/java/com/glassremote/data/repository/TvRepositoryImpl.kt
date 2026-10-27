@@ -4,6 +4,7 @@ import com.glassremote.data.bluetooth.BluetoothHidController
 import com.glassremote.data.network.PairingClient
 import com.glassremote.data.network.PairingSession
 import com.glassremote.data.network.RemoteSession
+import com.glassremote.data.network.TvAddressResolver
 import com.glassremote.data.network.TvDiscovery
 import com.glassremote.data.security.CertificateManager
 import com.glassremote.domain.model.KeyDirection
@@ -28,6 +29,7 @@ class TvRepositoryImpl @Inject constructor(
     private val certs: CertificateManager,
     private val store: PairedDeviceStore,
     private val bluetooth: BluetoothHidController,
+    private val resolver: TvAddressResolver,
 ) : TvRepository {
 
     private val _status = MutableStateFlow(RemoteStatus())
@@ -51,10 +53,37 @@ class TvRepositoryImpl @Inject constructor(
         store.save(device)
     }
 
+    /** Connects; if the saved IP doesn't answer, the TV is looked up again by its name. */
     override suspend fun connect(device: TvDevice) = withContext(Dispatchers.IO) {
         disconnect()
         _status.value = RemoteStatus(LinkPhase.Connecting)
 
+        var target = device
+        var refreshed = false
+        if (!resolver.reachable(target.host, target.port)) {
+            target = resolver.refresh(device)
+            refreshed = true
+        }
+        var failure: Throwable? = null
+        for (attempt in 0..1) {
+            try {
+                openSession(target)
+                return@withContext
+            } catch (t: Throwable) {
+                failure = t
+                if (!refreshed) {
+                    target = resolver.refresh(device)
+                    refreshed = true
+                } else {
+                    break
+                }
+            }
+        }
+        _status.value = RemoteStatus(LinkPhase.Disconnected, error = failure?.message ?: "Connection failed")
+        throw failure ?: IllegalStateException("Connection failed")
+    }
+
+    private fun openSession(device: TvDevice) {
         lateinit var session: RemoteSession
         session = RemoteSession(certs, device.host) { newStatus ->
             if (remote === session) _status.value = newStatus
@@ -65,15 +94,10 @@ class TvRepositoryImpl @Inject constructor(
         } catch (t: Throwable) {
             remote = null
             session.close()
-            _status.value = RemoteStatus(LinkPhase.Disconnected, error = t.message ?: "Connection failed")
             throw t
         }
     }
 
-    /**
-     * Routing: Wi-Fi remote link first. Bluetooth takes over when the link is down, a send fails,
-     * or "Prefer Bluetooth" is on (and Bluetooth is connected).
-     */
     override suspend fun sendKey(keyCode: Int, direction: KeyDirection) {
         val session = remote
         val wifiOk = session != null && session.isRunning.get() && _status.value.phase == LinkPhase.Ready
