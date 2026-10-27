@@ -2,6 +2,10 @@ package com.glassremote.ui.remote
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.glassremote.data.macro.MacroIds
+import com.glassremote.data.macro.MacroRecorder
+import com.glassremote.data.macro.MacroRunner
+import com.glassremote.data.macro.MacroStore
 import com.glassremote.data.repository.PairedDeviceStore
 import com.glassremote.domain.model.KeyDirection
 import com.glassremote.domain.model.LinkPhase
@@ -22,6 +26,9 @@ import javax.inject.Inject
 class RemoteViewModel @Inject constructor(
     private val repo: TvRepository,
     private val store: PairedDeviceStore,
+    private val macros: MacroStore,
+    private val runner: MacroRunner,
+    private val recorder: MacroRecorder,
 ) : ViewModel() {
 
     val status: StateFlow<RemoteStatus> = repo.status
@@ -36,7 +43,7 @@ class RemoteViewModel @Inject constructor(
 
     init {
         reconnect()
-        // If the TV drops the link (e.g. after launching an app), quietly reconnect up to 3 times.
+        // If the TV drops the link, quietly reconnect up to 3 times.
         viewModelScope.launch {
             var retries = 0
             repo.status.collect { s ->
@@ -61,11 +68,27 @@ class RemoteViewModel @Inject constructor(
     }
 
     fun key(code: Int) {
+        recorder.onKey(code)
         viewModelScope.launch { runCatching { repo.sendKey(code, KeyDirection.Short) } }
     }
 
     fun launchApp(target: String) {
         viewModelScope.launch { runCatching { repo.launchApp(target) } }
+    }
+
+    fun runMacro(id: String) {
+        viewModelScope.launch { runCatching { runner.run(macros.get(id)) } }
+    }
+
+    /** Direct link when no Stremio macro is saved, otherwise the macro. */
+    fun openStremio() {
+        viewModelScope.launch {
+            val macro = macros.get(MacroIds.STREMIO)
+            runCatching {
+                if (macro.isBlank()) repo.launchApp("market://launch?id=com.stremio.one")
+                else runner.run(macro)
+            }
+        }
     }
 
     fun forget() {
