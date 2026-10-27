@@ -3,6 +3,7 @@ package com.glassremote.ui.remote
 import android.view.KeyEvent
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -47,6 +48,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -55,6 +57,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
@@ -70,6 +73,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.glassremote.data.macro.MacroIds
 import com.glassremote.domain.model.LinkPhase
 import com.glassremote.domain.model.RemoteStatus
 import com.glassremote.ui.theme.glass
@@ -77,11 +81,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.abs
 
+private const val STREMIO_KEY = "stremio"
+
 private data class AppEntry(val label: String, val target: String)
 
 private val APPS = listOf(
     AppEntry("YouTube", "https://www.youtube.com"),
-    AppEntry("Stremio", "market://launch?id=com.stremio.one"),
+    AppEntry("Stremio", STREMIO_KEY),
     AppEntry("Netflix", "market://launch?id=com.netflix.ninja"),
     AppEntry("Prime Video", "market://launch?id=com.amazon.amazonvideo.livingroom"),
     AppEntry("Spotify", "market://launch?id=com.spotify.tv.android"),
@@ -93,7 +99,7 @@ fun RemoteScreen(vm: RemoteViewModel = hiltViewModel()) {
     val status by vm.status.collectAsStateWithLifecycle()
     val name by vm.deviceName.collectAsStateWithLifecycle()
     val press: (Int) -> Unit = { vm.key(it) }
-    var trackpad by rememberSaveable { mutableStateOf(false) }
+    var mode by rememberSaveable { mutableIntStateOf(0) } // 0 wheel, 1 trackpad, 2 keypad
     var showApps by rememberSaveable { mutableStateOf(false) }
 
     Box(Modifier.fillMaxSize()) {
@@ -107,45 +113,45 @@ fun RemoteScreen(vm: RemoteViewModel = hiltViewModel()) {
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
             TopBar(name, status, onStatusTap = { vm.reconnect() }, onPower = { press(KeyEvent.KEYCODE_POWER) })
+            ModeSwitch(mode) { mode = it }
 
-            if (trackpad) Trackpad(press) else DPad(press)
-            ModeSwitch(trackpad) { trackpad = it }
+            if (mode == 2) {
+                NavRow(press)
+                Keypad(press)
+            } else {
+                if (mode == 1) Trackpad(press) else DPad(press)
+                NavRow(press)
 
-            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                KeyButton(Modifier.size(92.dp, 58.dp), RoundedCornerShape(29.dp), onPressed = { press(KeyEvent.KEYCODE_BACK) }) {
-                    Glyph(Icons.Rounded.ArrowBack, 26.dp)
+                Row(horizontalArrangement = Arrangement.spacedBy(28.dp), verticalAlignment = Alignment.CenterVertically) {
+                    PillControl("VOL", Icons.Rounded.Add, Icons.Rounded.Remove,
+                        KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN, press)
+                    KeyButton(Modifier.size(64.dp), CircleShape, onPressed = { press(KeyEvent.KEYCODE_VOLUME_MUTE) }) {
+                        Glyph(Icons.Rounded.VolumeOff, 26.dp)
+                    }
+                    PillControl("CH", Icons.Rounded.ExpandLess, Icons.Rounded.ExpandMore,
+                        KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_CHANNEL_DOWN, press)
                 }
-                KeyButton(Modifier.size(92.dp, 58.dp), RoundedCornerShape(29.dp), onPressed = { press(KeyEvent.KEYCODE_HOME) }) {
-                    Glyph(Icons.Rounded.Home, 26.dp)
-                }
-                KeyButton(Modifier.size(92.dp, 58.dp), RoundedCornerShape(29.dp), onPressed = { press(KeyEvent.KEYCODE_ASSIST) }) {
-                    Glyph(Icons.Rounded.Mic, 26.dp)
-                }
-            }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(28.dp), verticalAlignment = Alignment.CenterVertically) {
-                PillControl("VOL", Icons.Rounded.Add, Icons.Rounded.Remove,
-                    KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN, press)
-                KeyButton(Modifier.size(64.dp), CircleShape, onPressed = { press(KeyEvent.KEYCODE_VOLUME_MUTE) }) {
-                    Glyph(Icons.Rounded.VolumeOff, 26.dp)
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    AppTile("YouTube", Icons.Rounded.PlayArrow) { vm.launchApp("https://www.youtube.com") }
+                    AppTile("Stremio", Icons.Rounded.Movie) { vm.openStremio() }
+                    AppTile("HDMI 2", Icons.Rounded.Tv) { vm.runMacro(MacroIds.HDMI2) }
+                    AppTile("Apps", Icons.Rounded.Apps) { showApps = true }
                 }
-                PillControl("CH", Icons.Rounded.ExpandLess, Icons.Rounded.ExpandMore,
-                    KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_CHANNEL_DOWN, press)
-            }
-
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                AppTile("YouTube", Icons.Rounded.PlayArrow) { vm.launchApp("https://www.youtube.com") }
-                AppTile("Stremio", Icons.Rounded.Movie) { vm.launchApp("market://launch?id=com.stremio.one") }
-                AppTile("HDMI 2", Icons.Rounded.Tv) { press(KeyEvent.KEYCODE_TV_INPUT_HDMI_2) }
-                AppTile("Apps", Icons.Rounded.Apps) { showApps = true }
             }
         }
 
         if (showApps) {
             AppPicker(
                 onDismiss = { showApps = false },
-                onLaunch = { target -> vm.launchApp(target); showApps = false },
-                onTvList = { press(KeyEvent.KEYCODE_ALL_APPS); showApps = false },
+                onLaunch = { target ->
+                    if (target == STREMIO_KEY) vm.openStremio() else vm.launchApp(target)
+                    showApps = false
+                },
+                onTvList = {
+                    press(KeyEvent.KEYCODE_ALL_APPS)
+                    showApps = false
+                },
             )
         }
     }
@@ -190,6 +196,47 @@ private fun TopBar(name: String, status: RemoteStatus, onStatusTap: () -> Unit, 
         }
         KeyButton(Modifier.size(52.dp), CircleShape, onPressed = onPower) {
             Glyph(Icons.Rounded.PowerSettingsNew, 24.dp, Color(0xFFFF6B6B))
+        }
+    }
+}
+
+@Composable
+private fun ModeSwitch(mode: Int, onChange: (Int) -> Unit) {
+    Row(Modifier.height(40.dp).glass(RoundedCornerShape(20.dp)).padding(3.dp)) {
+        listOf("Wheel", "Trackpad", "Keypad").forEachIndexed { index, label ->
+            val selected = mode == index
+            Box(
+                Modifier
+                    .width(92.dp)
+                    .fillMaxHeight()
+                    .background(
+                        if (selected) Color.White.copy(alpha = 0.18f) else Color.Transparent,
+                        RoundedCornerShape(17.dp),
+                    )
+                    .clickable { onChange(index) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    label,
+                    color = if (selected) Color.White else Color.White.copy(alpha = 0.55f),
+                    fontSize = 13.sp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NavRow(press: (Int) -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+        KeyButton(Modifier.size(92.dp, 58.dp), RoundedCornerShape(29.dp), onPressed = { press(KeyEvent.KEYCODE_BACK) }) {
+            Glyph(Icons.Rounded.ArrowBack, 26.dp)
+        }
+        KeyButton(Modifier.size(92.dp, 58.dp), RoundedCornerShape(29.dp), onPressed = { press(KeyEvent.KEYCODE_HOME) }) {
+            Glyph(Icons.Rounded.Home, 26.dp)
+        }
+        KeyButton(Modifier.size(92.dp, 58.dp), RoundedCornerShape(29.dp), onPressed = { press(KeyEvent.KEYCODE_ASSIST) }) {
+            Glyph(Icons.Rounded.Mic, 26.dp)
         }
     }
 }
@@ -271,29 +318,40 @@ private fun Trackpad(press: (Int) -> Unit) {
     }
 }
 
+/** QWERTY keys are sent as normal key presses, so any focused TV search box accepts them. */
 @Composable
-private fun ModeSwitch(trackpad: Boolean, onChange: (Boolean) -> Unit) {
-    Row(Modifier.height(40.dp).glass(RoundedCornerShape(20.dp)).padding(3.dp)) {
-        listOf("Wheel" to false, "Trackpad" to true).forEach { (label, value) ->
-            val selected = trackpad == value
-            Box(
-                Modifier
-                    .width(96.dp)
-                    .fillMaxHeight()
-                    .background(
-                        if (selected) Color.White.copy(alpha = 0.18f) else Color.Transparent,
-                        RoundedCornerShape(17.dp),
-                    )
-                    .clickable { onChange(value) },
-                contentAlignment = Alignment.Center,
+private fun Keypad(press: (Int) -> Unit) {
+    val rows = listOf("1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM")
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        rows.forEachIndexed { index, row ->
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = if (index == 2) 14.dp else 0.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Text(
-                    label,
-                    color = if (selected) Color.White else Color.White.copy(alpha = 0.55f),
-                    fontSize = 13.sp,
-                )
+                row.forEach { ch ->
+                    val code = if (ch in '0'..'9') KeyEvent.KEYCODE_0 + (ch - '0') else KeyEvent.KEYCODE_A + (ch - 'A')
+                    Cap(ch.toString(), Modifier.weight(1f)) { press(code) }
+                }
+                if (index == 3) {
+                    Cap("⌫", Modifier.weight(1.6f), repeat = true) { press(KeyEvent.KEYCODE_DEL) }
+                }
             }
         }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Cap("←", Modifier.weight(1f)) { press(KeyEvent.KEYCODE_DPAD_LEFT) }
+            Cap("↑", Modifier.weight(1f)) { press(KeyEvent.KEYCODE_DPAD_UP) }
+            Cap("↓", Modifier.weight(1f)) { press(KeyEvent.KEYCODE_DPAD_DOWN) }
+            Cap("→", Modifier.weight(1f)) { press(KeyEvent.KEYCODE_DPAD_RIGHT) }
+            Cap("space", Modifier.weight(2.2f)) { press(KeyEvent.KEYCODE_SPACE) }
+            Cap("Go", Modifier.weight(1.3f)) { press(KeyEvent.KEYCODE_ENTER) }
+        }
+    }
+}
+
+@Composable
+private fun Cap(label: String, modifier: Modifier, repeat: Boolean = false, onTap: () -> Unit) {
+    KeyButton(modifier.height(46.dp), RoundedCornerShape(12.dp), repeat = repeat, onPressed = onTap) {
+        Text(label, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
     }
 }
 
@@ -329,11 +387,19 @@ private fun AppTile(label: String, icon: ImageVector, onClick: () -> Unit) {
     }
 }
 
+/** Solid (opaque) dialog so nothing from the remote shows through. */
 @Composable
 private fun AppPicker(onDismiss: () -> Unit, onLaunch: (String) -> Unit, onTvList: () -> Unit) {
+    val panel = RoundedCornerShape(28.dp)
+    val chip = RoundedCornerShape(18.dp)
     Dialog(onDismissRequest = onDismiss) {
         Column(
-            Modifier.fillMaxWidth().glass(RoundedCornerShape(28.dp), strong = true).padding(20.dp),
+            Modifier
+                .fillMaxWidth()
+                .clip(panel)
+                .background(Color(0xFF1A1C23))
+                .border(0.8.dp, Color.White.copy(alpha = 0.18f), panel)
+                .padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("Open an app", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
@@ -344,7 +410,8 @@ private fun AppPicker(onDismiss: () -> Unit, onLaunch: (String) -> Unit, onTvLis
                             Modifier
                                 .weight(1f)
                                 .height(54.dp)
-                                .glass(RoundedCornerShape(18.dp))
+                                .clip(chip)
+                                .background(Color(0xFF2A2D37))
                                 .clickable { onLaunch(app.target) },
                             contentAlignment = Alignment.Center,
                         ) { Text(app.label, color = Color.White, fontSize = 14.sp) }
@@ -355,10 +422,11 @@ private fun AppPicker(onDismiss: () -> Unit, onLaunch: (String) -> Unit, onTvLis
                 Modifier
                     .fillMaxWidth()
                     .height(54.dp)
-                    .glass(RoundedCornerShape(18.dp))
+                    .clip(chip)
+                    .background(Color(0xFF2A2D37))
                     .clickable(onClick = onTvList),
                 contentAlignment = Alignment.Center,
-            ) { Text("Show the TV's own app list", color = Color.White.copy(alpha = 0.8f), fontSize = 14.sp) }
+            ) { Text("Show the TV's own app list", color = Color.White.copy(alpha = 0.85f), fontSize = 14.sp) }
         }
     }
 }
