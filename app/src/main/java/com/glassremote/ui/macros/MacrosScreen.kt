@@ -1,17 +1,25 @@
 package com.glassremote.ui.macros
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
@@ -20,7 +28,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -67,10 +77,11 @@ class MacrosViewModel @Inject constructor(
 }
 
 private fun hint(id: String): String = when (id) {
-    MacroIds.STREMIO -> "Leave empty to open Stremio with a direct link. If that fails, record: Home, move to Stremio, OK."
-    MacroIds.HDMI2 -> "Runs when you tap the HDMI 2 tile."
-    MacroIds.BACKLIGHT_OPEN -> "Runs when you start moving the Dashboard brightness slider. Should end on the Backlight value."
-    MacroIds.BACKLIGHT_CLOSE -> "Runs about 3 seconds after you stop moving the slider."
+    MacroIds.STREMIO -> "Used when ADB isn't connected. Empty = open with a stremio:// link. A link or intent: " +
+        "URI is sent as an app link; key words run as a macro."
+    MacroIds.HDMI2 -> "Used when ADB isn't connected or no HDMI 2 input is saved in the Link tab."
+    MacroIds.BACKLIGHT_OPEN -> "Fallback for the Dashboard backlight slider when ADB isn't connected."
+    MacroIds.BACKLIGHT_CLOSE -> "Runs about 3 seconds after you stop moving the slider (fallback mode)."
     else -> ""
 }
 
@@ -89,18 +100,12 @@ fun MacrosScreen(vm: MacrosViewModel) {
     ) {
         Text("Macros", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
 
-        Column(
-            Modifier.fillMaxWidth().glass(RoundedCornerShape(24.dp)).padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Text("How macros work", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Text(
-                "Keys: UP DOWN LEFT RIGHT OK BACK HOME SETTINGS MENU SEARCH ALL_APPS TV_INPUT, plus letters and digits. " +
-                    "WAIT 800 pauses 800 ms. DOWN*3 repeats a key. There is 200 ms between presses. " +
-                    "Record: tap Record, use the Remote tab on the TV as normal, then tap Stop.",
-                color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp,
-            )
-        }
+        CollapsibleCard(
+            "How macros work",
+            "Keys: UP DOWN LEFT RIGHT OK BACK HOME SETTINGS MENU SEARCH ALL_APPS TV_INPUT, plus letters and " +
+                "digits. WAIT 800 pauses 800 ms. DOWN*3 repeats a key. There is 200 ms between presses. " +
+                "Record: tap Record, use the Remote tab on the TV as normal, then tap Stop.",
+        )
 
         MacroIds.all.forEach { id -> MacroCard(id, vm, recording) }
 
@@ -108,10 +113,10 @@ fun MacrosScreen(vm: MacrosViewModel) {
             Modifier.fillMaxWidth().glass(RoundedCornerShape(24.dp)).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text("Backlight slider", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Text(
-                "Slider units per key press. If one press changes the TV backlight by 5, enter 5.",
-                color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp,
+            Text("Backlight slider (fallback)", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            InfoToggle(
+                "Only used when ADB isn't connected: slider units per key press. If one press changes the " +
+                    "TV backlight by 5, enter 5."
             )
             var u by remember(units) { mutableStateOf(units.toString()) }
             OutlinedTextField(
@@ -128,6 +133,53 @@ fun MacrosScreen(vm: MacrosViewModel) {
     }
 }
 
+/** A card whose body stays hidden until the card is tapped. */
+@Composable
+private fun CollapsibleCard(title: String, body: String) {
+    var open by rememberSaveable { mutableStateOf(false) }
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .glass(RoundedCornerShape(24.dp))
+            .clickable { open = !open }
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text(if (open) "−" else "+", color = Color.White.copy(alpha = 0.6f), fontSize = 20.sp)
+        }
+        AnimatedVisibility(visible = open) {
+            Text(body, color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
+private fun InfoToggle(text: String) {
+    var open by rememberSaveable { mutableStateOf(false) }
+    Column {
+        Row(
+            Modifier.clickable { open = !open }.padding(vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Rounded.Info, contentDescription = null,
+                tint = Color.White.copy(alpha = 0.5f), modifier = Modifier.size(16.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(if (open) "Hide info" else "Info", color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp)
+        }
+        AnimatedVisibility(visible = open) {
+            Text(text, color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp, modifier = Modifier.padding(top = 4.dp))
+        }
+    }
+}
+
 @Composable
 private fun MacroCard(id: String, vm: MacrosViewModel, recording: String?) {
     val flow = remember(id) { vm.text(id) }
@@ -139,7 +191,7 @@ private fun MacroCard(id: String, vm: MacrosViewModel, recording: String?) {
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text(MacroIds.title(id), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-        Text(hint(id), color = Color.White.copy(alpha = 0.5f), fontSize = 12.sp)
+        InfoToggle(hint(id))
         OutlinedTextField(
             value = text,
             onValueChange = { text = it },
