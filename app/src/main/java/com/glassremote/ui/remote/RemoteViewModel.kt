@@ -19,6 +19,7 @@ import com.glassremote.domain.model.TvDevice
 import com.glassremote.domain.repository.TvRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -29,6 +30,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 
 @HiltViewModel
@@ -59,8 +61,13 @@ class RemoteViewModel @Inject constructor(
 
     private var typed = ""
 
+    // Typing over ADB goes through one ordered queue so letters, backspace and Go keep their order.
+    private val adbOps = Channel<suspend () -> Unit>(Channel.UNLIMITED)
+    private val adbQueued = AtomicInteger(0)
+
     init {
         reconnect()
+        viewModelScope.launch { for (op in adbOps) runCatching { op() } }
         viewModelScope.launch {
             var retries = 0
             repo.status.collect { s ->
@@ -99,7 +106,6 @@ class RemoteViewModel @Inject constructor(
         viewModelScope.launch { runCatching { repo.launchApp(target) } }
     }
 
-    /** HDMI 2: native input switch when ADB is connected and an input is saved; otherwise the macro. */
     fun runMacro(id: String) {
         viewModelScope.launch {
             runCatching {
@@ -115,10 +121,6 @@ class RemoteViewModel @Inject constructor(
         }
     }
 
-    /**
-     * Stremio: native launch over ADB when connected. Otherwise the saved Stremio field:
-     * empty = stremio:// link, a link or intent: URI = sent as an app link, anything else = key macro.
-     */
     fun openStremio() {
         viewModelScope.launch {
             runCatching {
@@ -140,32 +142,55 @@ class RemoteViewModel @Inject constructor(
 
     fun toggleReplaceMode() { _replaceMode.value = !_replaceMode.value }
 
+    private fun viaAdb(block: suspend () -> Unit) {
+        adbQueued.incrementAndGet()
+        adbOps.trySend {
+            try {
+                block()
+            } finally {
+                adbQueued.decrementAndGet()
+            }
+        }
+    }
+
     fun typeChar(ch: Char) {
         val c = ch.lowercaseChar()
-        if (ImeBridge.state.value.active) {
-            if (_replaceMode.value) {
-                typed += c.toString()
-                sendText(typed)
-            } else {
-                sendText(c.toString())
+        val info = ImeBridge.state.value
+        val letter = c in 'a'..'z' || c == ' '
+        when {
+            info.active -> {
+                if (_replaceMode.value) {
+                    typed += c.toString()
+                    sendText(typed)
+                } else {
+                    sendText(c.toString())
+                }
             }
-        } else {
-            keyForChar(c)?.let { key(it) }
+            // The TV's remote link drops letter keys; ADB's `input text` doesn't.
+            letter && adb.state.value.connected -> viaAdb { nativeActions.typeText(c.toString()) }
+            else -> keyForChar(c)?.let { key(it) }
         }
     }
 
     fun backspace() {
-        if (ImeBridge.state.value.active && _replaceMode.value && typed.isNotEmpty()) {
-            typed = typed.dropLast(1)
-            sendText(typed)
-        } else {
-            key(KeyEvent.KEYCODE_DEL)
+        when {
+            ImeBridge.state.value.active && _replaceMode.value && typed.isNotEmpty() -> {
+                typed = typed.dropLast(1)
+                sendText(typed)
+            }
+            adbQueued.get() > 0 && adb.state.value.connected ->
+                viaAdb { nativeActions.keyEvent(KeyEvent.KEYCODE_DEL) }
+            else -> key(KeyEvent.KEYCODE_DEL)
         }
     }
 
     fun submitText() {
         typed = ""
-        key(KeyEvent.KEYCODE_ENTER)
+        if (adbQueued.get() > 0 && adb.state.value.connected) {
+            viaAdb { nativeActions.keyEvent(KeyEvent.KEYCODE_ENTER) }
+        } else {
+            key(KeyEvent.KEYCODE_ENTER)
+        }
     }
 
     private fun keyForChar(c: Char): Int? = when (c) {
