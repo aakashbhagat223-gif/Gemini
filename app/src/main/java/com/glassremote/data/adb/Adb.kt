@@ -3,6 +3,8 @@ package com.glassremote.data.adb
 import android.content.Context
 import android.net.Uri
 import com.glassremote.data.macro.MacroStore
+import com.glassremote.data.network.TvAddressResolver
+import com.glassremote.data.repository.PairedDeviceStore
 import com.glassremote.di.AppScope
 import dadb.AdbKeyPair
 import dadb.Dadb
@@ -14,8 +16,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -29,17 +33,38 @@ data class AdbState(
     val message: String = "Not connected",
 )
 
-/** ADB over TCP (port 5555). The TV asks you to accept this phone's key the first time. */
+/**
+ * ADB over TCP. Once you connect, it stays wanted: failed commands retry once, a keepalive runs every
+ * 15 s, and if the TV's IP changed it is looked up again by name.
+ */
 @Singleton
-class AdbManager @Inject constructor(@ApplicationContext private val ctx: Context) {
+class AdbManager @Inject constructor(
+    @ApplicationContext private val ctx: Context,
+    private val store: PairedDeviceStore,
+    private val resolver: TvAddressResolver,
+    @AppScope private val scope: CoroutineScope,
+) {
+    private val prefs = ctx.getSharedPreferences("adb", Context.MODE_PRIVATE)
 
     private val _state = MutableStateFlow(AdbState())
     val state: StateFlow<AdbState> = _state.asStateFlow()
 
     private val lock = Mutex()
 
-    @Volatile
-    private var dadb: Dadb? = null
+    @Volatile private var dadb: Dadb? = null
+    @Volatile private var wanted = prefs.getBoolean("wanted", false)
+    @Volatile private var lastHost = prefs.getString("host", "") ?: ""
+    @Volatile private var lastPort = prefs.getInt("port", 5555)
+
+    init {
+        // Connects at app start (if it was connected before) and keeps the link alive.
+        scope.launch {
+            while (true) {
+                if (wanted) runCatching { shell("echo 1") }
+                delay(15_000)
+            }
+        }
+    }
 
     private fun keyPair(): AdbKeyPair {
         val priv = File(ctx.filesDir, "adbkey")
@@ -48,16 +73,40 @@ class AdbManager @Inject constructor(@ApplicationContext private val ctx: Contex
         return AdbKeyPair.read(priv, pub)
     }
 
+    /** Must be called with [lock] held. */
+    private suspend fun openLocked(): Dadb {
+        val saved = store.lastDevice.first()
+        var host = lastHost.ifBlank { saved?.host ?: throw IllegalStateException("No TV address") }
+        if (!resolver.reachable(host, lastPort)) {
+            if (saved != null) {
+                val fresh = resolver.refresh(saved)
+                if (fresh.host != host) host = fresh.host
+            }
+            if (!resolver.reachable(host, lastPort)) {
+                throw IllegalStateException("TV not reachable at $host:$lastPort")
+            }
+        }
+        lastHost = host
+        prefs.edit().putString("host", host).apply()
+        val d = Dadb.create(host, lastPort, keyPair())
+        d.shell("echo ok") // first time: accept the prompt on the TV
+        dadb = d
+        _state.value = AdbState(true, host, "Connected to $host:$lastPort")
+        return d
+    }
+
     suspend fun connect(host: String, port: Int): Result<Unit> = withContext(Dispatchers.IO) {
         lock.withLock {
             runCatching {
-                dadb?.close()
+                runCatching { dadb?.close() }
                 dadb = null
-                _state.value = AdbState(false, host, "Connecting… accept the prompt on the TV")
-                val d = Dadb.create(host, port, keyPair())
-                d.shell("echo ok")
-                dadb = d
-                _state.value = AdbState(true, host, "Connected to $host:$port")
+                lastHost = host
+                lastPort = port
+                wanted = true
+                prefs.edit().putBoolean("wanted", true).putString("host", host).putInt("port", port).apply()
+                _state.value = AdbState(false, host, "Connecting… accept the prompt on the TV and tick Always allow")
+                openLocked()
+                Unit
             }.onFailure {
                 _state.value = AdbState(false, host, it.message ?: it.javaClass.simpleName)
             }
@@ -66,19 +115,27 @@ class AdbManager @Inject constructor(@ApplicationContext private val ctx: Contex
 
     suspend fun shell(command: String): String = withContext(Dispatchers.IO) {
         lock.withLock {
-            val d = dadb ?: error("ADB not connected")
-            try {
-                val r = d.shell(command)
-                r.output + r.errorOutput
-            } catch (t: Throwable) {
-                dadb = null
-                _state.value = AdbState(false, _state.value.host, t.message ?: "ADB error")
-                throw t
+            if (dadb == null && !wanted) throw IllegalStateException("ADB not connected")
+            var last: Throwable? = null
+            repeat(2) {
+                try {
+                    val d = dadb ?: openLocked()
+                    val r = d.shell(command)
+                    return@withContext r.output + r.errorOutput
+                } catch (t: Throwable) {
+                    last = t
+                    runCatching { dadb?.close() }
+                    dadb = null
+                    _state.value = AdbState(false, _state.value.host, "Reconnecting… (${t.message})")
+                }
             }
+            throw last ?: IllegalStateException("ADB error")
         }
     }
 
     fun disconnect() {
+        wanted = false
+        prefs.edit().putBoolean("wanted", false).apply()
         runCatching { dadb?.close() }
         dadb = null
         _state.value = AdbState()
@@ -104,7 +161,6 @@ class NativeActions @Inject constructor(
         }
     }
 
-    /** HDMI inputs known to the TV framework (ids look like com.vendor.tvinput/.hdmi.Service/HW5). */
     suspend fun hdmiInputs(): List<TvInput> {
         val dump = adb.shell("dumpsys tv_input")
         val idRe = Regex("""TvInputInfo\{id=([^,\s}]+)""")
@@ -125,7 +181,6 @@ class NativeActions @Inject constructor(
     suspend fun savedHdmi2(): String = store.get(KEY_HDMI2)
     suspend fun saveHdmi2(id: String) = store.set(KEY_HDMI2, id)
 
-    /** Lists TV settings whose names mention backlight / brightness / picture. */
     suspend fun backlightSettings(): List<String> {
         val re = Regex("backlight|brightness|picture", RegexOption.IGNORE_CASE)
         val rows = mutableListOf<String>()
@@ -137,14 +192,31 @@ class NativeActions @Inject constructor(
         return rows
     }
 
-    companion object { const val KEY_HDMI2 = "adb_hdmi2_input" }
+    // ---- typing (letters and space only; they go through `input text`) ----
+    suspend fun typeText(text: String): String = adb.shell("input text ${text.replace(" ", "%s")}")
+    suspend fun keyEvent(code: Int): String = adb.shell("input keyevent $code")
+
+    // ---- backlight: the TV's own setting (global picture_backlight) ----
+    suspend fun readBacklight(): Int? = adb.shell("settings get global $BACKLIGHT_KEY").trim().toIntOrNull()
+
+    suspend fun writeBacklight(value: Int) {
+        adb.shell("settings put global $BACKLIGHT_KEY ${value.coerceIn(0, 100)}")
+    }
+
+    suspend fun nativeBacklightEnabled(): Boolean = store.get(KEY_BACKLIGHT_NATIVE) != "0"
+    suspend fun setNativeBacklight(on: Boolean) = store.set(KEY_BACKLIGHT_NATIVE, if (on) "1" else "0")
+
+    companion object {
+        const val KEY_HDMI2 = "adb_hdmi2_input"
+        const val KEY_BACKLIGHT_NATIVE = "adb_backlight_native"
+        const val BACKLIGHT_KEY = "picture_backlight"
+    }
 }
 
 data class NowPlaying(val pkg: String, val title: String, val state: Int)
 
 private val STATE_RE = Regex("""state=PlaybackState \{state=(?:\w+\()?(\d+)""")
 
-/** Picks the playing (state 3) session, else a paused/buffering one, from `dumpsys media_session`. */
 fun parseMediaSessions(dump: String): NowPlaying? {
     val sessions = mutableListOf<NowPlaying>()
     var pkg: String? = null
@@ -180,7 +252,6 @@ class NowPlayingRepository @Inject constructor(
     private val adb: AdbManager,
     @AppScope scope: CoroutineScope,
 ) {
-    /** Polls every 3 s, only while something (the Dashboard) is collecting. */
     val state: StateFlow<NowPlaying?> = flow {
         while (true) {
             val np = if (adb.state.value.connected) {
