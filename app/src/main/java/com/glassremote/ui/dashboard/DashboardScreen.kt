@@ -63,6 +63,10 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
+import com.glassremote.data.adb.AdbManager
+import com.glassremote.data.adb.AdbState
+import com.glassremote.data.adb.NowPlaying
+import com.glassremote.data.adb.NowPlayingRepository
 import com.glassremote.data.ir.IrBlaster
 import com.glassremote.data.macro.MacroIds
 import com.glassremote.data.macro.MacroRunner
@@ -112,21 +116,23 @@ class DashboardViewModel @Inject constructor(
     ir: IrBlaster,
     private val macros: MacroStore,
     private val runner: MacroRunner,
+    nowPlayingRepo: NowPlayingRepository,
+    adb: AdbManager,
     @ApplicationContext private val ctx: Context,
 ) : ViewModel() {
 
     val status: StateFlow<RemoteStatus> = repo.status
     val irSupported: Boolean = ir.isSupported
+    val nowPlaying: StateFlow<NowPlaying?> = nowPlayingRepo.state
+    val adbState: StateFlow<AdbState> = adb.state
 
     val device: StateFlow<TvDevice?> = store.lastDevice
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
-    /** Foreground app on the TV (package name), as reported over the remote link. */
     val currentApp: StateFlow<String> = ImeBridge.state
         .map { it.currentApp }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "")
 
-    /** Polls every 5 s, only while the Dashboard is on screen. */
     val net: StateFlow<NetInfo> = device
         .flatMapLatest { d ->
             flow {
@@ -139,7 +145,6 @@ class DashboardViewModel @Inject constructor(
         .flowOn(Dispatchers.IO)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), NetInfo())
 
-    // Backlight: each trigger is one Left/Right press inside a Settings → Picture → Backlight session.
     private val presses = Channel<Int>(Channel.UNLIMITED)
     private var sessionOpen = false
 
@@ -169,13 +174,11 @@ class DashboardViewModel @Inject constructor(
         }
     }
 
-    /** +1 = brighter, -1 = dimmer. Ignored while the TV menu is still opening. */
     fun stepBacklight(direction: Int) {
         if (opening) return
         presses.trySend(direction)
     }
 
-    /** Finger lifted: drop anything still queued so nothing fires after release. */
     fun releaseBacklight() {
         while (presses.tryReceive().isSuccess) Unit
     }
@@ -230,6 +233,8 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
     val device by vm.device.collectAsStateWithLifecycle()
     val net by vm.net.collectAsStateWithLifecycle()
     val currentApp by vm.currentApp.collectAsStateWithLifecycle()
+    val nowPlaying by vm.nowPlaying.collectAsStateWithLifecycle()
+    val adbState by vm.adbState.collectAsStateWithLifecycle()
     val ctx = LocalContext.current
 
     var hasLocation by remember {
@@ -263,7 +268,7 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         Text("Dashboard", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-        NowPlaying(appLabel(currentApp))
+        NowPlayingCard(appLabel(currentApp), nowPlaying, adbState.connected)
 
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             StatTile("Link", linkText, Modifier.weight(1f), linkColor)
@@ -314,11 +319,10 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
     }
 }
 
-/** Centre-resting slider: drag away from the middle to repeat +/- steps; it springs back on release. */
 @Composable
 private fun SpringBacklightCard(onStep: (Int) -> Unit, onRelease: () -> Unit) {
     val haptics = LocalHaptics.current
-    val deflection = remember { Animatable(0f) } // -1 (full minus) .. +1 (full plus)
+    val deflection = remember { Animatable(0f) }
     var dragging by remember { mutableStateOf(false) }
     var trackWidthPx by remember { mutableFloatStateOf(0f) }
     val scope = rememberCoroutineScope()
@@ -327,7 +331,6 @@ private fun SpringBacklightCard(onStep: (Int) -> Unit, onRelease: () -> Unit) {
     val thumb = 44.dp
     val thumbPx = with(LocalDensity.current) { thumb.toPx() }
 
-    // While held away from centre: one step per interval, faster the further you pull.
     LaunchedEffect(dragging) {
         var atLimit = false
         while (dragging) {
@@ -346,7 +349,7 @@ private fun SpringBacklightCard(onStep: (Int) -> Unit, onRelease: () -> Unit) {
                     haptics?.tick()
                 }
                 step(if (d > 0f) 1 else -1)
-                delay((620f - 510f * mag).toLong()) // ~620 ms near centre, ~110 ms at the ends
+                delay((620f - 510f * mag).toLong())
             } else {
                 atLimit = false
                 delay(40)
@@ -421,7 +424,22 @@ private fun SpringBacklightCard(onStep: (Int) -> Unit, onRelease: () -> Unit) {
 }
 
 @Composable
-private fun NowPlaying(app: String) {
+private fun NowPlayingCard(app: String, np: NowPlaying?, adbConnected: Boolean) {
+    val header = when {
+        np == null -> if (app.isBlank()) "NOW PLAYING" else "ON THE TV"
+        np.state == 3 -> "NOW PLAYING"
+        else -> "PAUSED"
+    }
+    val title = when {
+        np != null -> np.title.ifBlank { appLabel(np.pkg) }
+        app.isNotBlank() -> app
+        else -> "Nothing reported"
+    }
+    val sub = when {
+        np != null -> appLabel(np.pkg)
+        adbConnected -> "Nothing is playing"
+        else -> "Connect ADB in the Link tab for titles"
+    }
     Box(Modifier.fillMaxWidth().height(170.dp).glass(RoundedCornerShape(28.dp))) {
         Box(
             Modifier.align(Alignment.CenterStart).padding(16.dp).size(110.dp)
@@ -435,18 +453,12 @@ private fun NowPlaying(app: String) {
             Modifier.align(Alignment.CenterStart).padding(start = 148.dp, end = 16.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
+            Text(header, color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp)
             Text(
-                if (app.isBlank()) "NOW PLAYING" else "ON THE TV",
-                color = Color.White.copy(alpha = 0.5f), fontSize = 11.sp,
+                title,
+                color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, maxLines = 2,
             )
-            Text(
-                app.ifBlank { "Nothing reported" },
-                color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, maxLines = 1,
-            )
-            Text(
-                "Titles and artwork aren't shared by the TV link",
-                color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp,
-            )
+            Text(sub, color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp, maxLines = 1)
         }
     }
 }
