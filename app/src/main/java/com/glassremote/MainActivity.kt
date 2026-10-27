@@ -6,6 +6,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,18 +22,23 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Dashboard
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SettingsRemote
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ProvideTextStyle
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -48,7 +54,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.glassremote.data.macro.MacroIds
 import com.glassremote.ui.dashboard.DashboardScreen
+import com.glassremote.ui.macros.MacrosScreen
+import com.glassremote.ui.macros.MacrosViewModel
 import com.glassremote.ui.pairing.PairingScreen
 import com.glassremote.ui.remote.RemoteScreen
 import com.glassremote.ui.remote.RemoteViewModel
@@ -88,8 +97,13 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun AppRoot(settingsVm: SettingsViewModel) {
     val remoteVm: RemoteViewModel = hiltViewModel()
+    val macrosVm: MacrosViewModel = hiltViewModel()
     val saved by remoteVm.saved.collectAsStateWithLifecycle()
+    val recording by macrosVm.recording.collectAsStateWithLifecycle()
     var tab by rememberSaveable { mutableIntStateOf(0) }
+
+    // Recording happens on the Remote tab.
+    LaunchedEffect(recording) { if (recording != null) tab = 0 }
 
     when (saved) {
         null -> GlassBackground {}
@@ -100,12 +114,37 @@ private fun AppRoot(settingsVm: SettingsViewModel) {
                     when (tab) {
                         0 -> RemoteScreen(remoteVm)
                         1 -> DashboardScreen()
+                        2 -> MacrosScreen(macrosVm)
                         else -> SettingsScreen(settingsVm)
                     }
                 }
+                recording?.let { id -> RecordingBar(MacroIds.title(id)) { macrosVm.stopRecording() } }
                 BottomNav(tab) { tab = it }
             }
         }
+    }
+}
+
+@Composable
+private fun RecordingBar(title: String, onStop: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp)
+            .height(48.dp)
+            .glass(RoundedCornerShape(24.dp), strong = true)
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Box(Modifier.size(10.dp).background(Color(0xFFF87171), CircleShape))
+            Text("Recording: $title", color = Color.White, fontSize = 13.sp, maxLines = 1)
+        }
+        TextButton(
+            onClick = onStop,
+            colors = ButtonDefaults.textButtonColors(contentColor = Color.White),
+        ) { Text("Stop", fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
     }
 }
 
@@ -114,6 +153,7 @@ private fun BottomNav(tab: Int, onSelect: (Int) -> Unit) {
     val items = listOf(
         "Remote" to Icons.Rounded.SettingsRemote,
         "Dashboard" to Icons.Rounded.Dashboard,
+        "Macros" to Icons.Rounded.Tune,
         "Settings" to Icons.Rounded.Settings,
     )
     Row(
