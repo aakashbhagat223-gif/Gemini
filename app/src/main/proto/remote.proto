@@ -1,0 +1,108 @@
+syntax = "proto2";
+package glassremote.remote;
+option java_package = "com.glassremote.proto.remote";
+option java_outer_classname = "RemoteProto";
+option java_multiple_files = true;
+
+enum RemoteDirection {
+  DIRECTION_UNKNOWN = 0;
+  DIRECTION_START_LONG = 1;
+  DIRECTION_END_LONG = 2;
+  DIRECTION_SHORT = 3;
+}
+
+message RemoteDeviceInfo {
+  optional string model = 1;
+  optional string vendor = 2;
+  optional int32 unknown1 = 3;
+  optional string unknown2 = 4;
+  optional string package_name = 5;
+  optional string app_version = 6;
+}
+message RemoteConfigure {
+  optional int32 code1 = 1;
+  optional RemoteDeviceInfo device_info = 2;
+}
+message RemoteSetActive { optional int32 active = 1; }
+message RemoteError {
+  optional bool value = 1;
+  optional RemoteMessage message = 2;
+}
+message RemotePingRequest {
+  optional int32 val1 = 1;
+  optional int32 val2 = 2;
+}
+message RemotePingResponse { optional int32 val1 = 1; }
+message RemoteKeyInject {
+  optional int32 key_code = 1;
+  optional RemoteDirection direction = 2;
+}
+message RemoteStart { optional bool started = 1; }
+message RemoteSetVolumeLevel {
+  optional uint32 unknown1 = 1;
+  optional uint32 unknown2 = 2;
+  optional string player_model = 3;
+  optional uint32 unknown4 = 4;
+  optional uint32 unknown5 = 5;
+  optional uint32 volume_max = 6;
+  optional uint32 volume_level = 7;
+  optional bool volume_muted = 8;
+}
+message RemoteAppLinkLaunchRequest { optional string app_link = 1; }
+
+// ---- text input (IME) channel ----
+message RemoteAppInfo {
+  optional int32 counter = 1;
+  optional int32 int2 = 2;
+  optional int32 int3 = 3;
+  optional string int4 = 4;
+  optional int32 int7 = 7;
+  optional int32 int8 = 8;
+  optional string label = 10;
+  optional string app_package = 12;
+  optional int32 int13 = 13;
+}
+message RemoteTextFieldStatus {
+  optional int32 counter_field = 1;
+  optional string value = 2;
+  optional int32 start = 3;
+  optional int32 end = 4;
+  optional int32 int5 = 5;
+  optional string label = 6;
+}
+message RemoteImeKeyInject {
+  optional RemoteAppInfo app_info = 1;
+  optional RemoteTextFieldStatus text_field_status = 2;
+}
+message RemoteImeObject {
+  optional int32 start = 1;
+  optional int32 end = 2;
+  optional string value = 3;
+}
+message RemoteEditInfo {
+  optional int32 insert = 1;
+  optional RemoteImeObject text_field_status = 2;
+}
+message RemoteImeBatchEdit {
+  optional int32 ime_counter = 1;
+  optional int32 field_counter = 2;
+  repeated RemoteEditInfo edit_info = 3;
+}
+message RemoteImeShowRequest {
+  optional RemoteTextFieldStatus remote_text_field_status = 2;
+}
+
+message RemoteMessage {
+  optional RemoteConfigure remote_configure = 1;
+  optional RemoteSetActive remote_set_active = 2;
+  optional RemoteError remote_error = 3;
+  optional RemotePingRequest remote_ping_request = 8;
+  optional RemotePingResponse remote_ping_response = 9;
+  optional RemoteKeyInject remote_key_inject = 10;
+  optional RemoteImeKeyInject remote_ime_key_inject = 20;
+  optional RemoteImeBatchEdit remote_ime_batch_edit = 21;
+  optional RemoteImeShowRequest remote_ime_show_request = 22;
+  optional RemoteStart remote_start = 40;
+  optional RemoteSetVolumeLevel remote_set_volume_level = 50;
+  optional RemoteAppLinkLaunchRequest remote_app_link_launch_request = 90;
+}
