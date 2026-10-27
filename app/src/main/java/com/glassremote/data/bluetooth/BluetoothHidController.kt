@@ -11,6 +11,8 @@ import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.view.KeyEvent
 import androidx.core.content.ContextCompat
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -29,8 +31,8 @@ data class BtState(
 )
 
 /**
- * Registers the phone as a Bluetooth keyboard + media remote (HID). Pair it with the TV from the
- * TV's "Add accessory" screen, then connect from the Link tab. Blocking send: call off the main thread.
+ * Registers the phone as a Bluetooth keyboard + media remote (HID). The state message always says
+ * what the phone's Bluetooth stack answered, so a refusal is visible.
  */
 @SuppressLint("MissingPermission")
 @Singleton
@@ -45,44 +47,66 @@ class BluetoothHidController @Inject constructor(@ApplicationContext private val
 
     private val prefs = ctx.getSharedPreferences("bt_backup", Context.MODE_PRIVATE)
     private val executor = Executors.newSingleThreadExecutor()
+    private val main = Handler(Looper.getMainLooper())
 
     @Volatile private var hid: BluetoothHidDevice? = null
     @Volatile private var host: BluetoothDevice? = null
+    @Volatile private var retried = false
 
     val isConnected: Boolean get() = host != null && hid != null
 
     private val adapter: BluetoothAdapter?
         get() = ctx.getSystemService(BluetoothManager::class.java)?.adapter
 
+    private fun setMessage(msg: String) { _state.update { it.copy(message = msg) } }
+
     fun hasPermission(): Boolean =
         Build.VERSION.SDK_INT < 31 ||
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.BLUETOOTH_CONNECT) ==
             PackageManager.PERMISSION_GRANTED
 
+    private val listener = object : BluetoothProfile.ServiceListener {
+        override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
+            if (profile != BluetoothProfile.HID_DEVICE) return
+            hid = proxy as BluetoothHidDevice
+            register()
+        }
+
+        override fun onServiceDisconnected(profile: Int) {
+            hid = null
+            host = null
+            _state.update { it.copy(registered = false, connectedName = null, message = "Bluetooth service stopped") }
+        }
+    }
+
     fun start() {
         val a = adapter
-        if (a == null) {
-            _state.update { it.copy(message = "This phone has no Bluetooth") }
+        if (a == null) { setMessage("This phone has no Bluetooth"); return }
+        if (!a.isEnabled) { setMessage("Turn Bluetooth on first"); return }
+        if (!hasPermission()) { setMessage("Bluetooth permission needed"); return }
+        if (hid != null) {
+            if (!_state.value.registered) register()
             return
         }
-        if (!hasPermission()) {
-            _state.update { it.copy(message = "Bluetooth permission needed") }
-            return
-        }
-        if (hid != null) return
-        a.getProfileProxy(ctx, object : BluetoothProfile.ServiceListener {
-            override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
-                if (profile != BluetoothProfile.HID_DEVICE) return
-                hid = proxy as BluetoothHidDevice
-                register()
-            }
+        retried = false
+        val ok = a.getProfileProxy(ctx, listener, BluetoothProfile.HID_DEVICE)
+        setMessage(
+            if (ok) "Starting…"
+            else "This phone doesn't offer the Bluetooth keyboard (HID device) role"
+        )
+    }
 
-            override fun onServiceDisconnected(profile: Int) {
-                hid = null
-                host = null
-                _state.update { it.copy(registered = false, connectedName = null, message = "Bluetooth service stopped") }
-            }
-        }, BluetoothProfile.HID_DEVICE)
+    fun stop() {
+        runCatching { hid?.unregisterApp() }
+        hid?.let { runCatching { adapter?.closeProfileProxy(BluetoothProfile.HID_DEVICE, it) } }
+        hid = null
+        host = null
+        _state.value = BtState()
+    }
+
+    fun restart() {
+        stop()
+        start()
     }
 
     private fun register() {
@@ -90,35 +114,51 @@ class BluetoothHidController @Inject constructor(@ApplicationContext private val
             "HomeRemote+", "TV remote", "HomeRemote",
             BluetoothHidDevice.SUBCLASS1_KEYBOARD, DESCRIPTOR,
         )
-        hid?.registerApp(sdp, null, null, executor, callback)
+        val accepted = hid?.registerApp(sdp, null, null, executor, callback) == true
+        setMessage(if (accepted) "Registering…" else "Bluetooth refused the keyboard registration request")
     }
 
     private val callback = object : BluetoothHidDevice.Callback() {
         override fun onAppStatusChanged(pluggedDevice: BluetoothDevice?, registered: Boolean) {
-            _state.update {
-                it.copy(
-                    registered = registered,
-                    message = if (registered) "Ready. Pair the phone from the TV's accessory screen, then connect."
-                    else "Not registered",
-                )
-            }
             if (registered) {
+                _state.update {
+                    it.copy(
+                        registered = true,
+                        message = "Registered. Pair the phone from the TV's accessory screen, then tap the TV below.",
+                    )
+                }
                 val last = prefs.getString("last", null)
                 val device = adapter?.bondedDevices?.firstOrNull { it.address == last }
                 if (device != null) hid?.connect(device)
+            } else {
+                _state.update { it.copy(registered = false) }
+                if (!retried) {
+                    retried = true
+                    setMessage("Registration failed, retrying…")
+                    main.postDelayed({
+                        runCatching { hid?.unregisterApp() }
+                        register()
+                    }, 1_500)
+                } else {
+                    setMessage(
+                        "The phone's Bluetooth rejected the keyboard registration. Some phones disable " +
+                            "this role, so Bluetooth backup may not be possible on this phone."
+                    )
+                }
             }
         }
 
         override fun onConnectionStateChanged(device: BluetoothDevice, state: Int) {
             when (state) {
+                BluetoothProfile.STATE_CONNECTING -> setMessage("Connecting to ${nameOf(device)}…")
                 BluetoothProfile.STATE_CONNECTED -> {
                     host = device
                     prefs.edit().putString("last", device.address).apply()
-                    _state.update { it.copy(connectedName = nameOf(device), message = "Connected") }
+                    _state.update { it.copy(connectedName = nameOf(device), message = "Connected to ${nameOf(device)}") }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     if (host?.address == device.address) host = null
-                    _state.update { it.copy(connectedName = null, message = "Disconnected") }
+                    _state.update { it.copy(connectedName = null, message = "Disconnected from ${nameOf(device)}") }
                 }
             }
         }
@@ -126,22 +166,27 @@ class BluetoothHidController @Inject constructor(@ApplicationContext private val
 
     private fun nameOf(d: BluetoothDevice): String = runCatching { d.name }.getOrNull() ?: d.address
 
-    /** (name, address) of devices already paired with this phone. */
     fun bondedInfo(): List<Pair<String, String>> {
         if (!hasPermission()) return emptyList()
         return adapter?.bondedDevices.orEmpty().map { nameOf(it) to it.address }
     }
 
     fun connectTo(address: String) {
-        val device = adapter?.bondedDevices?.firstOrNull { it.address == address } ?: return
-        hid?.connect(device)
+        val h = hid
+        if (h == null) { setMessage("Bluetooth service isn't ready. Tap Enable."); return }
+        if (!_state.value.registered) {
+            setMessage("Keyboard not registered yet. " + _state.value.message)
+            return
+        }
+        val device = adapter?.bondedDevices?.firstOrNull { it.address == address }
+        if (device == null) { setMessage("That device isn't paired with this phone"); return }
+        setMessage(if (h.connect(device)) "Connecting to ${nameOf(device)}…" else "The connect request was rejected")
     }
 
     fun disconnectHost() {
         host?.let { hid?.disconnect(it) }
     }
 
-    /** Sends one key press+release. Returns false if Bluetooth isn't connected or the key has no HID mapping. */
     fun sendKey(code: Int): Boolean {
         val h = hid ?: return false
         val dev = host ?: return false
@@ -196,7 +241,6 @@ class BluetoothHidController @Inject constructor(@ApplicationContext private val
     private companion object {
         private fun b(vararg v: Int) = ByteArray(v.size) { v[it].toByte() }
 
-        // Report 1: keyboard (modifiers, reserved, 6 keys). Report 2: consumer control (16-bit usage).
         val DESCRIPTOR: ByteArray = b(
             0x05, 0x01, 0x09, 0x06, 0xA1, 0x01, 0x85, 0x01,
             0x05, 0x07, 0x19, 0xE0, 0x29, 0xE7, 0x15, 0x00, 0x25, 0x01,
