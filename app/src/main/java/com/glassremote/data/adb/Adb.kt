@@ -33,9 +33,11 @@ data class AdbState(
     val message: String = "Not connected",
 )
 
+data class ShellResult(val output: String, val exitCode: Int)
+
 /**
- * ADB over TCP. Once you connect, it stays wanted: failed commands retry once, a keepalive runs every
- * 15 s, and if the TV's IP changed it is looked up again by name.
+ * ADB over TCP to the Xiaomi TV (port 5555). Once you connect, it stays wanted: failed commands retry
+ * once, a keepalive runs every 15 s, and if the TV's IP changed it is looked up again by name.
  */
 @Singleton
 class AdbManager @Inject constructor(
@@ -57,7 +59,6 @@ class AdbManager @Inject constructor(
     @Volatile private var lastPort = prefs.getInt("port", 5555)
 
     init {
-        // Connects at app start (if it was connected before) and keeps the link alive.
         scope.launch {
             while (true) {
                 if (wanted) runCatching { shell("echo 1") }
@@ -89,7 +90,7 @@ class AdbManager @Inject constructor(
         lastHost = host
         prefs.edit().putString("host", host).apply()
         val d = Dadb.create(host, lastPort, keyPair())
-        d.shell("echo ok") // first time: accept the prompt on the TV
+        d.shell("echo ok")
         dadb = d
         _state.value = AdbState(true, host, "Connected to $host:$lastPort")
         return d
@@ -113,7 +114,8 @@ class AdbManager @Inject constructor(
         }
     }
 
-    suspend fun shell(command: String): String = withContext(Dispatchers.IO) {
+    /** Runs a shell command on the TV and returns its output and exit code. */
+    suspend fun shellResult(command: String): ShellResult = withContext(Dispatchers.IO) {
         lock.withLock {
             if (dadb == null && !wanted) throw IllegalStateException("ADB not connected")
             var last: Throwable? = null
@@ -121,7 +123,7 @@ class AdbManager @Inject constructor(
                 try {
                     val d = dadb ?: openLocked()
                     val r = d.shell(command)
-                    return@withContext r.output + r.errorOutput
+                    return@withContext ShellResult(r.output + r.errorOutput, r.exitCode)
                 } catch (t: Throwable) {
                     last = t
                     runCatching { dadb?.close() }
@@ -132,6 +134,8 @@ class AdbManager @Inject constructor(
             throw last ?: IllegalStateException("ADB error")
         }
     }
+
+    suspend fun shell(command: String): String = shellResult(command).output
 
     fun disconnect() {
         wanted = false
@@ -144,7 +148,14 @@ class AdbManager @Inject constructor(
 
 data class TvInput(val id: String, val type: Int)
 
-/** One-click native actions that go through ADB instead of key macros. */
+data class CecResult(val ok: Boolean, val output: String)
+
+private val CEC_FAIL = Regex(
+    "unknown command|no shell command|not found|exception|error|usage:|invalid|unsupported",
+    RegexOption.IGNORE_CASE,
+)
+
+/** One-click native actions that go through the TV's ADB shell. */
 @Singleton
 class NativeActions @Inject constructor(
     private val adb: AdbManager,
@@ -181,6 +192,9 @@ class NativeActions @Inject constructor(
     suspend fun savedHdmi2(): String = store.get(KEY_HDMI2)
     suspend fun saveHdmi2(id: String) = store.set(KEY_HDMI2, id)
 
+    /** The saved HDMI 2 input, or the MediaTek input id from your scan if none is saved. */
+    suspend fun hdmi2OrDefault(): String = savedHdmi2().ifBlank { DEFAULT_HDMI2 }
+
     suspend fun backlightSettings(): List<String> {
         val re = Regex("backlight|brightness|picture", RegexOption.IGNORE_CASE)
         val rows = mutableListOf<String>()
@@ -192,11 +206,11 @@ class NativeActions @Inject constructor(
         return rows
     }
 
-    // ---- typing (letters and space only; they go through `input text`) ----
+    // ---- typing (letters and space only) ----
     suspend fun typeText(text: String): String = adb.shell("input text ${text.replace(" ", "%s")}")
     suspend fun keyEvent(code: Int): String = adb.shell("input keyevent $code")
 
-    // ---- backlight: the TV's own setting (global picture_backlight) ----
+    // ---- backlight ----
     suspend fun readBacklight(): Int? = adb.shell("settings get global $BACKLIGHT_KEY").trim().toIntOrNull()
 
     suspend fun writeBacklight(value: Int) {
@@ -206,10 +220,62 @@ class NativeActions @Inject constructor(
     suspend fun nativeBacklightEnabled(): Boolean = store.get(KEY_BACKLIGHT_NATIVE) != "0"
     suspend fun setNativeBacklight(on: Boolean) = store.set(KEY_BACKLIGHT_NATIVE, if (on) "1" else "0")
 
+    // ---- Jio box: HDMI-CEC keys sent by the TV, injected through the TV's ADB shell ----
+
+    suspend fun cecTemplate(): String = store.get(KEY_CEC_TEMPLATE).ifBlank { DEFAULT_CEC_TEMPLATE }
+    suspend fun setCecTemplate(template: String) = store.set(KEY_CEC_TEMPLATE, template)
+    suspend fun resetCecTemplate() = store.reset(KEY_CEC_TEMPLATE)
+
+    /**
+     * Sends one CEC user-control key from the TV to the device at [logicalAddress]
+     * (4 = playback device 1, normally the first box on HDMI). The shell command comes from the
+     * template: {hex} = 0x41-style, {dec} = decimal, {la} = logical address.
+     * Never falls back to the TV's own keys; a failure is returned, not hidden.
+     */
+    suspend fun sendJioCecKey(cecKeyCode: Int, logicalAddress: Int = 4): CecResult {
+        if (!connected) return CecResult(false, "ADB isn't connected")
+        val command = cecTemplate()
+            .replace("{hex}", "0x%02X".format(cecKeyCode))
+            .replace("{dec}", cecKeyCode.toString())
+            .replace("{la}", logicalAddress.toString())
+        return try {
+            val r = adb.shellResult(command)
+            val failed = r.exitCode != 0 || CEC_FAIL.containsMatchIn(r.output)
+            CecResult(!failed, r.output.trim())
+        } catch (t: Throwable) {
+            CecResult(false, t.message ?: "ADB error")
+        }
+    }
+
+    /** What this TV's CEC layer supports and which devices it can see on HDMI. */
+    suspend fun cecDiagnostics(): String {
+        val sb = StringBuilder()
+        sb.appendLine("hdmi_control_enabled = " + adb.shell("settings get global hdmi_control_enabled").trim())
+        sb.appendLine()
+        sb.appendLine("--- cmd hdmi_control help ---")
+        sb.appendLine(adb.shell("cmd hdmi_control help").lines().take(30).joinToString("\n"))
+        sb.appendLine()
+        sb.appendLine("--- dumpsys hdmi_control (filtered) ---")
+        val keep = Regex(
+            "logical|physical|vendor|power status|cec version|devicetype|active source|port",
+            RegexOption.IGNORE_CASE,
+        )
+        sb.append(
+            adb.shell("dumpsys hdmi_control").lines()
+                .filter { keep.containsMatchIn(it) }
+                .take(40)
+                .joinToString("\n") { it.trim() }
+        )
+        return sb.toString()
+    }
+
     companion object {
         const val KEY_HDMI2 = "adb_hdmi2_input"
         const val KEY_BACKLIGHT_NATIVE = "adb_backlight_native"
+        const val KEY_CEC_TEMPLATE = "adb_cec_template"
         const val BACKLIGHT_KEY = "picture_backlight"
+        const val DEFAULT_HDMI2 = "com.mediatek.tis/.HdmiInputService/HW3"
+        const val DEFAULT_CEC_TEMPLATE = "cmd hdmi_control cec_key -t {la} -a {hex}"
     }
 }
 
