@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.glassremote.domain.model.LinkPhase
 import com.glassremote.domain.repository.TvRepository
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.delay
@@ -18,6 +19,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -39,7 +41,6 @@ object MacroIds {
         else -> id
     }
 
-    /** Best guesses from the TV's quick-settings panel; tune with Test / Record. */
     fun default(id: String): String = when (id) {
         HDMI2 -> "SETTINGS WAIT 800 RIGHT OK WAIT 800 DOWN DOWN OK"
         BACKLIGHT_OPEN -> "SETTINGS WAIT 800 DOWN OK WAIT 800 DOWN OK"
@@ -122,22 +123,51 @@ fun parseMacro(text: String): List<MacroStep> {
     return out
 }
 
+/** Live progress of the macro that is running (idle when [running] is false). */
+data class MacroRunState(
+    val running: Boolean = false,
+    val label: String = "",
+    val step: Int = 0,
+    val total: Int = 0,
+)
+
 @Singleton
 class MacroRunner @Inject constructor(private val repo: TvRepository) {
     private val lock = Mutex()
 
-    /** One macro at a time; [stepDelayMs] is the pause after every key press. */
-    suspend fun run(text: String, stepDelayMs: Long = 200L) {
+    private val _state = MutableStateFlow(MacroRunState())
+    val state: StateFlow<MacroRunState> = _state.asStateFlow()
+
+    @Volatile
+    private var cancelled = false
+
+    fun cancel() { cancelled = true }
+
+    /** One macro at a time. Each key waits (up to 3 s) for the TV link to be ready, then pauses [stepDelayMs]. */
+    suspend fun run(text: String, stepDelayMs: Long = 200L, label: String = "") {
         val steps = parseMacro(text)
+        if (steps.isEmpty()) return
         lock.withLock {
-            for (s in steps) {
-                when (s) {
-                    is MacroStep.Press -> {
-                        repo.sendKey(s.code)
-                        delay(stepDelayMs)
+            cancelled = false
+            try {
+                for ((index, step) in steps.withIndex()) {
+                    if (cancelled) return
+                    _state.value = MacroRunState(true, label, index + 1, steps.size)
+                    when (step) {
+                        is MacroStep.Press -> {
+                            if (repo.status.value.phase != LinkPhase.Ready) {
+                                withTimeoutOrNull(3_000L) {
+                                    repo.status.first { it.phase == LinkPhase.Ready }
+                                }
+                            }
+                            repo.sendKey(step.code)
+                            delay(stepDelayMs)
+                        }
+                        is MacroStep.Wait -> delay(step.ms)
                     }
-                    is MacroStep.Wait -> delay(s.ms)
                 }
+            } finally {
+                _state.value = MacroRunState()
             }
         }
     }
@@ -184,7 +214,6 @@ class MacroRecorder @Inject constructor() {
         last = now
     }
 
-    /** Returns (macro id, recorded text) or null if nothing was recording. */
     @Synchronized
     fun stop(): Pair<String, String>? {
         val id = _target.value ?: return null
