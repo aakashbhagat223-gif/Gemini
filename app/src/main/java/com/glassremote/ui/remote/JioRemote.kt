@@ -41,11 +41,14 @@ import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Remove
 import androidx.compose.material.icons.rounded.VolumeOff
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -60,106 +63,32 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewModelScope
-import com.glassremote.data.adb.AdbManager
-import com.glassremote.data.adb.NativeActions
-import com.glassremote.data.bluetooth.BluetoothHidController
-import com.glassremote.data.macro.MacroIds
 import com.glassremote.data.macro.MacroRunState
-import com.glassremote.data.macro.MacroRunner
-import com.glassremote.data.macro.MacroStore
-import com.glassremote.domain.model.KeyDirection
-import com.glassremote.domain.repository.TvRepository
 import com.glassremote.ui.theme.LocalHaptics
 import com.glassremote.ui.theme.glass
-import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
-import javax.inject.Inject
-
-private const val ROUTE_CEC = "Via the TV (HDMI-CEC pass-through)"
-
-@HiltViewModel
-class JioViewModel @Inject constructor(
-    private val repo: TvRepository,
-    private val bt: BluetoothHidController,
-    private val adb: AdbManager,
-    private val actions: NativeActions,
-    private val macros: MacroStore,
-    private val runner: MacroRunner,
-) : ViewModel() {
-
-    val macroState: StateFlow<MacroRunState> = runner.state
-
-    private val _note = MutableStateFlow("")
-    val note: StateFlow<String> = _note.asStateFlow()
-
-    private fun isJio(name: String?) = name?.contains("jio", ignoreCase = true) == true
-
-    /** Where Jio keys currently go. */
-    val route: StateFlow<String> = bt.state
-        .map { st -> if (isJio(st.connectedName)) "Bluetooth → ${st.connectedName}" else ROUTE_CEC }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, ROUTE_CEC)
-
-    fun cancelMacro() = runner.cancel()
-
-    /** Puts the TV on the HDMI 2 input the Jio box is plugged into. */
-    fun selectJio() {
-        viewModelScope.launch {
-            _note.value = "Switching the TV to HDMI 2…"
-            runCatching {
-                val input = actions.savedHdmi2()
-                if (adb.state.value.connected && input.isNotBlank()) {
-                    actions.switchInput(input)
-                    _note.value = "TV is on HDMI 2"
-                } else {
-                    runner.run(macros.get(MacroIds.HDMI2), label = "HDMI 2")
-                    _note.value = "Ran the HDMI 2 macro"
-                }
-            }.onFailure { _note.value = "Couldn't switch input: ${it.message}" }
-        }
-    }
-
-    /** Bluetooth to the Jio box when connected; otherwise the TV link (the TV passes keys on over CEC). */
-    fun key(code: Int) {
-        viewModelScope.launch(Dispatchers.IO) {
-            if (bt.isConnected && isJio(bt.state.value.connectedName) && bt.sendKey(code)) return@launch
-            runCatching { repo.sendKey(code, KeyDirection.Short) }
-        }
-    }
-}
 
 /** Glass target bar on top: [Xiaomi TV] [Jio Box]. The Xiaomi side is the existing remote screen. */
 @Composable
-fun RemoteHost(remoteVm: RemoteViewModel, jioVm: JioViewModel = hiltViewModel()) {
-    var target by rememberSaveable { mutableIntStateOf(0) }
-    val macro by jioVm.macroState.collectAsStateWithLifecycle()
-    val note by jioVm.note.collectAsStateWithLifecycle()
+fun RemoteHost(remoteVm: RemoteViewModel) {
+    val target by remoteVm.target.collectAsStateWithLifecycle()
+    val macro by remoteVm.macroState.collectAsStateWithLifecycle()
 
     Column(Modifier.fillMaxSize()) {
-        TargetBar(target, macro, onCancel = { jioVm.cancelMacro() }) { index ->
-            if (index != target) {
-                target = index
-                if (index == 1) jioVm.selectJio()
-            }
-        }
+        TargetBar(target, macro, onCancel = { remoteVm.cancelMacro() }) { remoteVm.setTarget(it) }
         Box(Modifier.weight(1f).consumeWindowInsets(WindowInsets.statusBars)) {
-            if (target == 0) RemoteScreen(remoteVm) else JioRemoteScreen(jioVm, note)
+            if (target == ControlTarget.XIAOMI_TV) RemoteScreen(remoteVm) else JioRemoteScreen(remoteVm)
         }
     }
 }
 
 @Composable
-private fun TargetBar(target: Int, macro: MacroRunState, onCancel: () -> Unit, onSelect: (Int) -> Unit) {
+private fun TargetBar(
+    target: ControlTarget,
+    macro: MacroRunState,
+    onCancel: () -> Unit,
+    onSelect: (ControlTarget) -> Unit,
+) {
     Row(
         Modifier
             .fillMaxWidth()
@@ -169,27 +98,28 @@ private fun TargetBar(target: Int, macro: MacroRunState, onCancel: () -> Unit, o
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
         Row(Modifier.height(44.dp).glass(RoundedCornerShape(22.dp), strong = true).padding(3.dp)) {
-            listOf("Xiaomi TV", "Jio Box").forEachIndexed { index, label ->
-                val selected = target == index
-                Box(
-                    Modifier
-                        .width(110.dp)
-                        .fillMaxHeight()
-                        .background(
-                            if (selected) Color.White.copy(alpha = 0.20f) else Color.Transparent,
-                            RoundedCornerShape(19.dp),
+            listOf(ControlTarget.XIAOMI_TV to "Xiaomi TV", ControlTarget.JIO_BOX to "Jio Box")
+                .forEach { (value, label) ->
+                    val selected = target == value
+                    Box(
+                        Modifier
+                            .width(110.dp)
+                            .fillMaxHeight()
+                            .background(
+                                if (selected) Color.White.copy(alpha = 0.20f) else Color.Transparent,
+                                RoundedCornerShape(19.dp),
+                            )
+                            .clickable { onSelect(value) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            label,
+                            color = if (selected) Color.White else Color.White.copy(alpha = 0.55f),
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Medium,
                         )
-                        .clickable { onSelect(index) },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        label,
-                        color = if (selected) Color.White else Color.White.copy(alpha = 0.55f),
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.Medium,
-                    )
+                    }
                 }
-            }
         }
         if (macro.running) {
             Text(
@@ -207,10 +137,11 @@ private fun TargetBar(target: Int, macro: MacroRunState, onCancel: () -> Unit, o
 }
 
 @Composable
-private fun JioRemoteScreen(vm: JioViewModel, note: String) {
-    val route by vm.route.collectAsStateWithLifecycle()
+private fun JioRemoteScreen(vm: RemoteViewModel) {
+    val note by vm.jioNote.collectAsStateWithLifecycle()
+    val adb by vm.adbState.collectAsStateWithLifecycle()
     var showDigits by rememberSaveable { mutableStateOf(false) }
-    val send: (Int) -> Unit = { vm.key(it) }
+    val send: (Int) -> Unit = { vm.jioKey(it) }
 
     Column(
         Modifier
@@ -221,7 +152,8 @@ private fun JioRemoteScreen(vm: JioViewModel, note: String) {
         verticalArrangement = Arrangement.spacedBy(18.dp),
     ) {
         Text(
-            route + if (note.isNotBlank()) " · $note" else "",
+            (if (adb.connected) "Jio keys → HDMI-CEC sent by the TV (ADB)" else "Connect ADB in the Link tab to use the Jio remote") +
+                if (note.isNotBlank()) " · $note" else "",
             color = Color.White.copy(alpha = 0.55f), fontSize = 12.sp,
         )
 
@@ -252,10 +184,9 @@ private fun JioRemoteScreen(vm: JioViewModel, note: String) {
             JioKey(Modifier.size(92.dp, 54.dp), RoundedCornerShape(27.dp), { send(KeyEvent.KEYCODE_MENU) }) {
                 JioGlyph(Icons.Rounded.Menu, 24.dp)
             }
-            JioKey(
-                Modifier.size(92.dp, 54.dp), RoundedCornerShape(27.dp),
-                { showDigits = !showDigits },
-            ) { JioGlyph(Icons.Rounded.Dialpad, 24.dp, if (showDigits) Color.White else Color.White.copy(alpha = 0.7f)) }
+            JioKey(Modifier.size(92.dp, 54.dp), RoundedCornerShape(27.dp), { showDigits = !showDigits }) {
+                JioGlyph(Icons.Rounded.Dialpad, 24.dp, if (showDigits) Color.White else Color.White.copy(alpha = 0.7f))
+            }
         }
 
         AnimatedVisibility(visible = showDigits) { DigitPad(send) }
@@ -269,9 +200,76 @@ private fun JioRemoteScreen(vm: JioViewModel, note: String) {
             Rocker("CH", Icons.Rounded.ExpandLess, Icons.Rounded.ExpandMore,
                 KeyEvent.KEYCODE_CHANNEL_UP, KeyEvent.KEYCODE_CHANNEL_DOWN, send)
         }
+
+        CecTools(vm)
         Spacer(Modifier.height(12.dp))
     }
 }
+
+/** Diagnostics and the editable shell command used to send CEC keys. */
+@Composable
+private fun CecTools(vm: RemoteViewModel) {
+    var open by rememberSaveable { mutableStateOf(false) }
+    val template by vm.cecTemplate.collectAsStateWithLifecycle()
+    val output by vm.cecOutput.collectAsStateWithLifecycle()
+    var text by remember(template) { mutableStateOf(template) }
+
+    Column(
+        Modifier.fillMaxWidth().glass(RoundedCornerShape(20.dp)).padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(
+            Modifier.fillMaxWidth().clickable { open = !open },
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("CEC tools", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(if (open) "−" else "+", color = Color.White.copy(alpha = 0.6f), fontSize = 18.sp)
+        }
+        AnimatedVisibility(visible = open) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Shell command run on the TV for each Jio key. {hex} = key code like 0x01, {la} = " +
+                        "box address (4). Use Diagnostics to see what this TV's CEC supports.",
+                    color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp,
+                )
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    colors = fieldColors(),
+                )
+                Row {
+                    ToolButton("Save") { vm.saveCecTemplate(text) }
+                    ToolButton("Reset") { vm.resetCecTemplate() }
+                    ToolButton("Diagnostics") { vm.cecDiagnostics() }
+                    ToolButton("Test OK") { vm.cecTest() }
+                }
+                if (output.isNotBlank()) {
+                    Text(output, color = Color.White.copy(alpha = 0.8f), fontSize = 11.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ToolButton(label: String, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        colors = ButtonDefaults.textButtonColors(contentColor = Color.White),
+    ) { Text(label, fontSize = 12.sp) }
+}
+
+@Composable
+private fun fieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedTextColor = Color.White,
+    unfocusedTextColor = Color.White,
+    cursorColor = Color.White,
+    focusedBorderColor = Color.White.copy(alpha = 0.6f),
+    unfocusedBorderColor = Color.White.copy(alpha = 0.25f),
+)
 
 @Composable
 private fun CompactDPad(send: (Int) -> Unit) {
