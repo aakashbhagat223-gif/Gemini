@@ -29,11 +29,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -55,6 +61,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -68,11 +75,17 @@ import com.glassremote.data.adb.AdbState
 import com.glassremote.data.adb.NativeActions
 import com.glassremote.data.adb.NowPlaying
 import com.glassremote.data.adb.NowPlayingRepository
+import com.glassremote.data.bluetooth.BluetoothHidController
+import com.glassremote.data.bluetooth.BtState
 import com.glassremote.data.ir.IrBlaster
 import com.glassremote.data.macro.MacroIds
 import com.glassremote.data.macro.MacroRunner
 import com.glassremote.data.macro.MacroStore
 import com.glassremote.data.network.ImeBridge
+import com.glassremote.data.network.PairPhase
+import com.glassremote.data.network.PairState
+import com.glassremote.data.network.ProbeResult
+import com.glassremote.data.network.StbProbe
 import com.glassremote.data.repository.PairedDeviceStore
 import com.glassremote.domain.model.LinkPhase
 import com.glassremote.domain.model.RemoteStatus
@@ -122,6 +135,8 @@ class DashboardViewModel @Inject constructor(
     nowPlayingRepo: NowPlayingRepository,
     private val adb: AdbManager,
     private val actions: NativeActions,
+    bt: BluetoothHidController,
+    private val stb: StbProbe,
     @ApplicationContext private val ctx: Context,
 ) : ViewModel() {
 
@@ -129,6 +144,9 @@ class DashboardViewModel @Inject constructor(
     val irSupported: Boolean = ir.isSupported
     val nowPlaying: StateFlow<NowPlaying?> = nowPlayingRepo.state
     val adbState: StateFlow<AdbState> = adb.state
+    val btState: StateFlow<BtState> = bt.state
+    val stbResult: StateFlow<ProbeResult> = stb.result
+    val stbPair: StateFlow<PairState> = stb.pair
 
     val device: StateFlow<TvDevice?> = store.lastDevice
         .stateIn(viewModelScope, SharingStarted.Eagerly, null)
@@ -149,12 +167,17 @@ class DashboardViewModel @Inject constructor(
         .flowOn(Dispatchers.IO)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), NetInfo())
 
+    // ---- Jio box probe / pairing test ----
+    fun probeStb(host: String) { viewModelScope.launch { stb.probe(host) } }
+    fun pairStb(host: String) { viewModelScope.launch { stb.beginPairing(host) } }
+    fun submitStbCode(code: String) { viewModelScope.launch { stb.submitCode(code) } }
+
     // ---- Backlight ----
     private val _backlight = MutableStateFlow<Int?>(null)
     val backlight: StateFlow<Int?> = _backlight.asStateFlow()
 
-    private val deltas = Channel<Int>(Channel.UNLIMITED)  // native mode: signed backlight steps
-    private val presses = Channel<Int>(Channel.UNLIMITED) // macro fallback: +1 / -1 key presses
+    private val deltas = Channel<Int>(Channel.UNLIMITED)
+    private val presses = Channel<Int>(Channel.UNLIMITED)
     private var baseBacklight: Int? = null
     private var nativeBacklight = true
     private var sessionOpen = false
@@ -163,7 +186,6 @@ class DashboardViewModel @Inject constructor(
     private var opening = false
 
     init {
-        // Native: batch whatever steps piled up and write the TV's backlight setting once.
         viewModelScope.launch {
             for (first in deltas) {
                 var sum = first
@@ -180,14 +202,13 @@ class DashboardViewModel @Inject constructor(
                 }
             }
         }
-        // Fallback: menu macros plus Left/Right presses.
         viewModelScope.launch {
             var closeJob: Job? = null
             for (direction in presses) {
                 closeJob?.cancel()
                 if (!sessionOpen) {
                     opening = true
-                    runCatching { runner.run(macros.get(MacroIds.BACKLIGHT_OPEN)) }
+                    runCatching { runner.run(macros.get(MacroIds.BACKLIGHT_OPEN), label = "Backlight") }
                     sessionOpen = true
                     opening = false
                 }
@@ -196,14 +217,13 @@ class DashboardViewModel @Inject constructor(
                 delay(90)
                 closeJob = launch {
                     delay(3_000)
-                    runCatching { runner.run(macros.get(MacroIds.BACKLIGHT_CLOSE)) }
+                    runCatching { runner.run(macros.get(MacroIds.BACKLIGHT_CLOSE), label = "Backlight") }
                     sessionOpen = false
                 }
             }
         }
     }
 
-    /** Reads the TV's current backlight (ADB) and whether native mode is switched on. */
     fun refreshBacklight() {
         viewModelScope.launch {
             nativeBacklight = actions.nativeBacklightEnabled()
@@ -216,7 +236,6 @@ class DashboardViewModel @Inject constructor(
         }
     }
 
-    /** direction +1/-1, magnitude 0..1 (how far the handle is pulled). */
     fun stepBacklight(direction: Int, magnitude: Float) {
         if (adb.state.value.connected && nativeBacklight) {
             val delta = direction * (1 + (magnitude * 5f).toInt())
@@ -285,6 +304,9 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
     val nowPlaying by vm.nowPlaying.collectAsStateWithLifecycle()
     val adbState by vm.adbState.collectAsStateWithLifecycle()
     val backlight by vm.backlight.collectAsStateWithLifecycle()
+    val btState by vm.btState.collectAsStateWithLifecycle()
+    val stbResult by vm.stbResult.collectAsStateWithLifecycle()
+    val stbPair by vm.stbPair.collectAsStateWithLifecycle()
     val ctx = LocalContext.current
 
     LaunchedEffect(adbState.connected) { vm.refreshBacklight() }
@@ -299,18 +321,6 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
         hasLocation = it
     }
 
-    val linkColor = when (status.phase) {
-        LinkPhase.Ready -> Color(0xFF34D399)
-        LinkPhase.Connecting -> Color(0xFFFBBF24)
-        else -> Color(0xFFF87171)
-    }
-    val linkText = when (status.phase) {
-        LinkPhase.Ready -> "Connected"
-        LinkPhase.Connecting -> "Connecting…"
-        LinkPhase.Disconnected -> "Disconnected"
-        LinkPhase.Idle -> "Idle"
-    }
-
     Column(
         Modifier
             .fillMaxSize()
@@ -322,17 +332,21 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
         Text("Dashboard", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
         NowPlayingCard(appLabel(currentApp), nowPlaying, adbState.connected)
 
-        Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            StatTile("Link", linkText, Modifier.weight(1f), linkColor)
-            StatTile("Latency", net.pingMs?.let { "$it ms" } ?: "—", Modifier.weight(1f))
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            StatTile("TV address", device?.host ?: "—", Modifier.weight(1f))
-            StatTile(
-                "This phone", net.phoneIp ?: "—", Modifier.weight(1f),
-                if (net.wifi) Color(0xFF34D399) else Color(0xFFF87171),
-            )
-        }
+        TelemetryPager(
+            tvName = device?.name ?: "",
+            tvHost = device?.host ?: "",
+            tvPing = net.pingMs,
+            phase = status.phase,
+            adb = adbState,
+            phoneIp = net.phoneIp,
+            jio = stbResult,
+            pair = stbPair,
+            btName = btState.connectedName,
+            onProbe = { vm.probeStb(it) },
+            onPair = { vm.pairStb(it) },
+            onCode = { vm.submitStbCode(it) },
+        )
+
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
             StatTile(
                 "Wi-Fi",
@@ -346,10 +360,9 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
                 onClick = if (!hasLocation) ({ askLocation.launch(Manifest.permission.ACCESS_FINE_LOCATION) }) else null,
             )
             StatTile(
-                "ADB",
-                if (adbState.connected) "Connected" else "Off",
+                "IR blaster",
+                if (vm.irSupported) "Available" else "Not supported",
                 Modifier.weight(1f),
-                if (adbState.connected) Color(0xFF34D399) else Color(0xFFF87171),
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -364,14 +377,6 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
                 Modifier.weight(1f),
             )
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            StatTile(
-                "IR blaster",
-                if (vm.irSupported) "Available" else "Not supported",
-                Modifier.weight(1f),
-            )
-            StatTile("Backlight", backlight?.toString() ?: "—", Modifier.weight(1f))
-        }
 
         SpringBacklightCard(
             backlight = backlight,
@@ -380,6 +385,184 @@ fun DashboardScreen(vm: DashboardViewModel = hiltViewModel()) {
         )
     }
 }
+
+/** Swipe between the Xiaomi TV and the Jio box. */
+@Composable
+private fun TelemetryPager(
+    tvName: String,
+    tvHost: String,
+    tvPing: Int?,
+    phase: LinkPhase,
+    adb: AdbState,
+    phoneIp: String?,
+    jio: ProbeResult,
+    pair: PairState,
+    btName: String?,
+    onProbe: (String) -> Unit,
+    onPair: (String) -> Unit,
+    onCode: (String) -> Unit,
+) {
+    val pagerState = rememberPagerState(pageCount = { 2 })
+    Column(
+        Modifier.fillMaxWidth().glass(RoundedCornerShape(24.dp)).padding(vertical = 14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.fillMaxWidth().height(380.dp),
+            pageSpacing = 12.dp,
+        ) { page ->
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 18.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (page == 0) {
+                    TvPage(tvName, tvHost, tvPing, phase, adb, phoneIp)
+                } else {
+                    JioPage(jio, pair, btName, onProbe, onPair, onCode)
+                }
+            }
+        }
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+            repeat(2) { i ->
+                Box(
+                    Modifier
+                        .padding(3.dp)
+                        .size(7.dp)
+                        .background(
+                            if (pagerState.currentPage == i) Color.White else Color.White.copy(alpha = 0.3f),
+                            CircleShape,
+                        )
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TvPage(
+    name: String,
+    host: String,
+    ping: Int?,
+    phase: LinkPhase,
+    adb: AdbState,
+    phoneIp: String?,
+) {
+    Text(
+        "Xiaomi TV · " + name.ifBlank { "not paired" },
+        color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
+    )
+    Line("TV IP", host.ifBlank { "—" })
+    Line("Latency", ping?.let { "$it ms" } ?: "—")
+    Line(
+        "Remote link",
+        when (phase) {
+            LinkPhase.Ready -> "Live"
+            LinkPhase.Connecting -> "Connecting…"
+            LinkPhase.Disconnected -> "Down"
+            LinkPhase.Idle -> "Idle"
+        },
+    )
+    Line("Pairing", if (phase == LinkPhase.Ready) "Valid · certificate accepted" else "Not verified")
+    Line("ADB", if (adb.connected) "Connected" else "Off")
+    Line("This phone", phoneIp ?: "—")
+}
+
+@Composable
+private fun JioPage(
+    jio: ProbeResult,
+    pair: PairState,
+    btName: String?,
+    onProbe: (String) -> Unit,
+    onPair: (String) -> Unit,
+    onCode: (String) -> Unit,
+) {
+    var host by remember(jio.host) { mutableStateOf(jio.host) }
+    var code by remember { mutableStateOf("") }
+
+    Text("Jio box", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+    OutlinedTextField(
+        value = host,
+        onValueChange = { host = it },
+        singleLine = true,
+        label = { Text("Box IP") },
+        modifier = Modifier.fillMaxWidth(),
+        colors = fieldColors(),
+    )
+    Row {
+        MiniButton("Probe") { onProbe(host.trim()) }
+        MiniButton("Pair") { onPair(host.trim()) }
+    }
+    Line("Reachable", jio.pingMs?.let { "$it ms" } ?: "—")
+    Line("Cast name", jio.castName ?: "—")
+    Line("Model", listOfNotNull(jio.castMaker, jio.castModel).joinToString(" ").ifBlank { "—" })
+    Line("Open ports", if (jio.openPorts.isEmpty()) "—" else jio.openPorts.joinToString())
+    Line(
+        "Remote protocol (6466/6467)",
+        when {
+            6466 in jio.openPorts || 6467 in jio.openPorts -> "Open"
+            jio.openPorts.isNotEmpty() -> "Closed"
+            else -> "—"
+        },
+    )
+    Line("Pairing", pair.phase.name)
+    if (pair.message.isNotBlank()) {
+        Text(pair.message, color = Color.White.copy(alpha = 0.6f), fontSize = 12.sp)
+    }
+    if (pair.phase == PairPhase.AwaitingCode) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = code,
+                onValueChange = { code = it.uppercase().filter { c -> c in "0123456789ABCDEF" }.take(6) },
+                singleLine = true,
+                label = { Text("Code") },
+                modifier = Modifier.weight(1f),
+                colors = fieldColors(),
+            )
+            MiniButton("Submit") { onCode(code) }
+        }
+    }
+    Line("Bluetooth", btName ?: "not connected")
+    Text(jio.message, color = Color.White.copy(alpha = 0.45f), fontSize = 11.sp)
+}
+
+@Composable
+private fun Line(label: String, value: String) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, color = Color.White.copy(alpha = 0.55f), fontSize = 13.sp)
+        Text(
+            value,
+            color = Color.White,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            textAlign = TextAlign.End,
+            maxLines = 2,
+            modifier = Modifier.weight(1f, fill = false).padding(start = 12.dp),
+        )
+    }
+}
+
+@Composable
+private fun MiniButton(label: String, onClick: () -> Unit) {
+    TextButton(
+        onClick = onClick,
+        colors = ButtonDefaults.textButtonColors(contentColor = Color.White),
+    ) { Text(label, fontSize = 13.sp) }
+}
+
+@Composable
+private fun fieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedTextColor = Color.White,
+    unfocusedTextColor = Color.White,
+    cursorColor = Color.White,
+    focusedBorderColor = Color.White.copy(alpha = 0.6f),
+    unfocusedBorderColor = Color.White.copy(alpha = 0.25f),
+    focusedLabelColor = Color.White.copy(alpha = 0.7f),
+    unfocusedLabelColor = Color.White.copy(alpha = 0.5f),
+)
 
 @Composable
 private fun SpringBacklightCard(
