@@ -62,7 +62,7 @@ import com.glassremote.ui.link.LinkScreen
 import com.glassremote.ui.macros.MacrosScreen
 import com.glassremote.ui.macros.MacrosViewModel
 import com.glassremote.ui.pairing.PairingScreen
-import com.glassremote.ui.remote.RemoteScreen
+import com.glassremote.ui.remote.RemoteHost
 import com.glassremote.ui.remote.RemoteViewModel
 import com.glassremote.ui.settings.SettingsScreen
 import com.glassremote.ui.settings.SettingsViewModel
@@ -86,7 +86,7 @@ class MainActivity : ComponentActivity() {
             statusBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(AndroidColor.TRANSPARENT),
         )
-        bluetooth.start() // registers as a Bluetooth remote if permission is already granted
+        bluetooth.start()
         setContent {
             val settingsVm: SettingsViewModel = hiltViewModel()
             val style by settingsVm.style.collectAsStateWithLifecycle()
@@ -123,7 +123,7 @@ private fun AppRoot(settingsVm: SettingsViewModel) {
             Column(Modifier.fillMaxSize()) {
                 Box(Modifier.weight(1f).consumeWindowInsets(WindowInsets.navigationBars)) {
                     when (tab) {
-                        0 -> RemoteScreen(remoteVm)
+                        0 -> RemoteHost(remoteVm)
                         1 -> DashboardScreen()
                         2 -> LinkScreen()
                         3 -> MacrosScreen(macrosVm)
