@@ -3,18 +3,23 @@ package com.glassremote.data.adb
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.BufferedReader
-import java.io.InputStreamReader
+import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 
 object Adb {
-    private const val TAG = "AdbController"
+    private const val TAG = "Adb"
     var host: String = "192.168.31.116"
     var port: Int = 5555
 
     suspend fun sendKeyEvent(keyCode: Int): Boolean = withContext(Dispatchers.IO) {
         val command = "input keyevent $keyCode"
+        return@withContext executeShell(command)
+    }
+
+    suspend fun sendText(text: String): Boolean = withContext(Dispatchers.IO) {
+        val escaped = text.replace(" ", "%s").replace("\"", "\\\"")
+        val command = "input text \"$escaped\""
         return@withContext executeShell(command)
     }
 
@@ -24,19 +29,23 @@ object Adb {
     }
 
     suspend fun executeShell(cmd: String): Boolean = withContext(Dispatchers.IO) {
-        try {
-            // First verify socket connectivity to ADB port
+        return@withContext try {
             Socket().use { socket ->
-                socket.connect(InetSocketAddress(host, port), 1200)
+                socket.connect(InetSocketAddress(host, port), 1000)
+                val out: OutputStream = socket.getOutputStream()
+                out.write("shell:$cmd\n".toByteArray())
+                out.flush()
             }
-            // Execute command via adb socket or local runtime fallback
-            val process = Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
-            val exitCode = process.waitFor()
-            Log.d(TAG, "Command: '$cmd' completed with exit code: $exitCode")
-            return@withContext exitCode == 0
+            true
         } catch (e: Exception) {
-            Log.w(TAG, "ADB shell execution failed for '$cmd': ${e.message}")
-            return@withContext false
+            Log.w(TAG, "Direct ADB command failed ($cmd): ${e.message}")
+            // Fallback to local shell execution if ADB daemon is configured locally
+            try {
+                val process = Runtime.getRuntime().exec(arrayOf("sh", "-c", cmd))
+                process.waitFor() == 0
+            } catch (ex: Exception) {
+                false
+            }
         }
     }
 }
