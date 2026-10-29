@@ -7,17 +7,17 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.media.MediaMetadata
+import android.media.session.MediaSession
+import android.media.session.PlaybackState
 import android.os.Build
 import android.os.IBinder
-import android.support.v4.media.MediaMetadataCompat
-import android.support.v4.media.session.MediaSessionCompat
-import android.support.v4.media.session.PlaybackStateCompat
 import androidx.core.app.NotificationCompat
 import com.glassremote.MainActivity
 
 class NowPlayingService : Service() {
 
-    private lateinit var mediaSession: MediaSessionCompat
+    private var mediaSession: MediaSession? = null
     private lateinit var notificationManager: NotificationManager
 
     companion object {
@@ -38,10 +38,14 @@ class NowPlayingService : Service() {
                 putExtra(EXTRA_ARTIST, artist)
                 putExtra(EXTRA_IS_PLAYING, isPlaying)
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
 
@@ -58,16 +62,14 @@ class NowPlayingService : Service() {
         notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         createNotificationChannel()
 
-        mediaSession = MediaSessionCompat(this, "GlassRemoteMediaSession").apply {
-            setCallback(object : MediaSessionCompat.Callback() {
+        mediaSession = MediaSession(this, "GlassRemoteMediaSession").apply {
+            setCallback(object : MediaSession.Callback() {
                 override fun onPlay() {
-                    // Send ADB media play
                     com.glassremote.data.adb.Adb.sendKeyEvent(126) // KEYCODE_MEDIA_PLAY
                     updatePlaybackState(true)
                 }
 
                 override fun onPause() {
-                    // Send ADB media pause
                     com.glassremote.data.adb.Adb.sendKeyEvent(127) // KEYCODE_MEDIA_PAUSE
                     updatePlaybackState(false)
                 }
@@ -87,7 +89,7 @@ class NowPlayingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP_SERVICE -> {
-                mediaSession.isActive = false
+                mediaSession?.isActive = false
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
@@ -107,27 +109,27 @@ class NowPlayingService : Service() {
     }
 
     private fun updateMetadata(title: String, artist: String) {
-        val metadata = MediaMetadataCompat.Builder()
-            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
-            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
-            .putString(MediaMetadataCompat.METADATA_KEY_ALBUM_ARTIST, "Xiaomi TV")
+        val metadata = MediaMetadata.Builder()
+            .putString(MediaMetadata.METADATA_KEY_TITLE, title)
+            .putString(MediaMetadata.METADATA_KEY_ARTIST, artist)
+            .putString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST, "Xiaomi TV")
             .build()
-        mediaSession.setMetadata(metadata)
+        mediaSession?.setMetadata(metadata)
     }
 
     private fun updatePlaybackState(isPlaying: Boolean) {
-        val state = if (isPlaying) PlaybackStateCompat.STATE_PLAYING else PlaybackStateCompat.STATE_PAUSED
-        val actions = PlaybackStateCompat.ACTION_PLAY or
-                PlaybackStateCompat.ACTION_PAUSE or
-                PlaybackStateCompat.ACTION_PLAY_PAUSE or
-                PlaybackStateCompat.ACTION_SKIP_TO_NEXT or
-                PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+        val state = if (isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED
+        val actions = PlaybackState.ACTION_PLAY or
+                PlaybackState.ACTION_PAUSE or
+                PlaybackState.ACTION_PLAY_PAUSE or
+                PlaybackState.ACTION_SKIP_TO_NEXT or
+                PlaybackState.ACTION_SKIP_TO_PREVIOUS
 
-        val playbackState = PlaybackStateCompat.Builder()
+        val playbackState = PlaybackState.Builder()
             .setActions(actions)
-            .setState(state, PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN, 1.0f)
+            .setState(state, PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1.0f)
             .build()
-        mediaSession.setPlaybackState(playbackState)
+        mediaSession?.setPlaybackState(playbackState)
     }
 
     private fun buildNotification(title: String, artist: String, isPlaying: Boolean): Notification {
@@ -141,41 +143,15 @@ class NowPlayingService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val playPauseAction = if (isPlaying) {
-            NotificationCompat.Action.Builder(
-                android.R.drawable.ic_media_pause,
-                "Pause",
-                androidx.media.session.MediaButtonReceiver.buildMediaButtonPendingIntent(
-                    this,
-                    PlaybackStateCompat.ACTION_PAUSE
-                )
-            ).build()
-        } else {
-            NotificationCompat.Action.Builder(
-                android.R.drawable.ic_media_play,
-                "Play",
-                androidx.media.session.MediaButtonReceiver.buildMediaButtonPendingIntent(
-                    this,
-                    PlaybackStateCompat.ACTION_PLAY
-                )
-            ).build()
-        }
-
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle(title)
             .setContentText(artist)
             .setSubText("Xiaomi TV")
             .setContentIntent(contentPendingIntent)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC) // Shows directly on Lockscreen
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setOngoing(isPlaying)
-            .addAction(playPauseAction)
-            .setStyle(
-                androidx.media.app.NotificationCompat.MediaStyle()
-                    .setMediaSession(mediaSession.sessionToken)
-                    .setShowActionsInCompactView(0)
-            )
             .build()
     }
 
@@ -194,7 +170,7 @@ class NowPlayingService : Service() {
     }
 
     override fun onDestroy() {
-        mediaSession.release()
+        mediaSession?.release()
         super.onDestroy()
     }
 
